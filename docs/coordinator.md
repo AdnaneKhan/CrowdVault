@@ -122,7 +122,23 @@ Optionally, publish the source on Etherscan so backers can read the code: see [P
 
 ## 5. Put the vault page online
 
-The page in `web/` is a static site with no server.
+The page in `web/` is a static site with no server. Backers use it to contribute and withdraw, and it shows the key once it's released. You have two ways to host it.
+
+**GitHub Pages, from a fork of this repo (easiest).** Every push to `main` publishes the page with `.github/workflows/pages.yml`. Visitors choose Ethereum or the Sepolia testnet, paste the vault address, or try the demo. It reads the chain through free public RPCs, so backers can see the vault before they connect a wallet.
+
+1. Fork the repo. In the fork, open **Settings → Pages** and set **Source** to **GitHub Actions**.
+2. So the page can tell your vaults from lookalikes, add your factory addresses under **Settings → Secrets and variables → Actions → Variables**: `FACTORY_MAINNET` and `FACTORY_SEPOLIA`. Without them, the page warns that it can't confirm a vault is genuine.
+3. Run the **Pages** workflow from the **Actions** tab, or push to `main`.
+
+The page appears at `https://<your-user>.github.io/<repo>/`. Share a link that opens your vault directly:
+
+```text
+https://<your-user>.github.io/<repo>/?network=mainnet&vault=0x…
+```
+
+Use `network=sepolia` for a testnet vault.
+
+**Any static host, for one chain.** Build the page yourself:
 
 ```bash
 cd web
@@ -132,10 +148,10 @@ cp .env.example .env
 
 Edit `.env`:
 
-- `VITE_CHAIN_ID`: the chain your vault is on, for example 1 for Ethereum or 8453 for Base. The page refuses to send transactions on any other network and asks the wallet to switch.
-- `VITE_FACTORY_ADDRESS`: your factory. The page only shows vaults it created, so a lookalike contract at a phishing link is refused. Without it, the page warns that it can't confirm the vault is genuine.
+- `VITE_CHAIN_ID`: the chain your vault is on, for example 1 for Ethereum or 8453 for Base. The page then serves only that chain: it refuses to send transactions on any other network and asks the wallet to switch. Leave it empty to offer Ethereum and Sepolia, as on GitHub Pages.
+- `VITE_FACTORY_ADDRESS`: your factory. The page only shows vaults it created, so a lookalike contract at a phishing link is refused. Without it, the page warns that it can't confirm the vault is genuine. (Without `VITE_CHAIN_ID`, use `VITE_FACTORY_MAINNET` and `VITE_FACTORY_SEPOLIA` instead.)
 - `VITE_VAULT_ADDRESS`: your vault, so the page opens straight to it. Without it, visitors paste the address or use `?vault=0x…` in the link.
-- `VITE_RPC_URL`: lets visitors without a wallet see the vault. It ends up in the public page, so use a public endpoint or a key restricted to your domain.
+- `VITE_RPC_URL`: lets visitors without a wallet see the vault. It ends up in the public page, so use a public endpoint or a key restricted to your domain. Ethereum and Sepolia already have public defaults.
 
 Then:
 
@@ -143,7 +159,9 @@ Then:
 npm run build
 ```
 
-Upload `web/dist/` to any static host, such as Netlify, Vercel, Cloudflare Pages, GitHub Pages or IPFS. To preview first, run `npm run dev`; on the dev server only, adding `?demo` shows a pretend vault you can step through every state of. `npm run build:demo` makes a separate single-file demo page.
+Upload `web/dist/` to any static host, such as Netlify, Vercel, Cloudflare Pages or IPFS. To preview first, run `npm run dev`; on the dev server, adding `?demo` shows a pretend vault you can step through every state of. Set `VITE_DEMO_BUTTON=1` to offer the same demo on your page. `npm run build:demo` makes a separate single-file demo page.
+
+Visitors can switch to their own RPC under **Connection** at the bottom of the page. It's saved in their browser only.
 
 ## 6. Brief your creators
 
@@ -238,7 +256,7 @@ The key is on-chain and on the vault page. Announce it and point people to the "
 - [ ] Settings chosen
 - [ ] Full test run on a testnet ([Deploying the contracts](deploying.md))
 - [ ] Vault deployed through the factory, its `keyAddress` matches, and `isVault` is true
-- [ ] Vault page online, with `VITE_CHAIN_ID` and `VITE_FACTORY_ADDRESS` set
+- [ ] Vault page online, and it recognizes your vault as genuine (no warning)
 - [ ] Creators briefed, and the list of sealed files published
 - [ ] Claimed early in the window, and the recipient paid
 - [ ] Key announced

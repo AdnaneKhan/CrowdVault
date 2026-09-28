@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { formatEther, parseEther, type Address } from "viem";
 import { Cipherfield } from "./Cipherfield";
 import { Seal } from "./Seal";
+import { CAN_CHOOSE_NETWORK, NETWORKS, initialNetwork, saveRpc, savedRpc, type Network } from "./networks";
 import {
   DEMO,
+  DEMO_BUTTON,
   Phase,
   checkVault,
   connect,
@@ -17,6 +19,7 @@ import {
   loadStatus,
   readClient,
   withdraw,
+  type Conn,
   type PhaseValue,
   type VaultStatus,
 } from "./vault";
@@ -135,12 +138,94 @@ function Mark() {
   );
 }
 
+function NetworkPicker({ net, onChange }: { net: Network; onChange: (n: Network) => void }) {
+  return (
+    <div className="seg seg-net" role="group" aria-label="Network">
+      {NETWORKS.map((n) => (
+        <button key={n.key} type="button" aria-pressed={n.key === net.key} onClick={() => onChange(n)}>
+          {n.label}
+          {n.testnet && <span className="seg-note"> testnet</span>}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Which RPC the page reads through: the network's public list, one of them, or the visitor's own. */
+function Connection({ conn, onRpc }: { conn: Conn; onRpc: (url: string) => void }) {
+  const { net, rpc } = conn;
+  const isCustom = rpc !== "" && !net.rpcs.includes(rpc);
+  const [editing, setEditing] = useState(isCustom);
+  const [draft, setDraft] = useState(isCustom ? rpc : "");
+  const [bad, setBad] = useState(false);
+  return (
+    <details className="creators connection">
+      <summary>Connection</summary>
+      <p>
+        How this page reads {net.label}. Contributions and withdrawals always go through your wallet. Public RPCs are
+        free but can be slow; use your own if they struggle.
+      </p>
+      <label htmlFor="rpc">RPC</label>
+      <select
+        id="rpc"
+        className="text-field"
+        value={editing ? "custom" : rpc}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === "custom") return setEditing(true);
+          setEditing(false);
+          onRpc(v);
+        }}
+      >
+        <option value="">{net.rpcs.length ? "Automatic: the public RPCs, in turn" : "Your wallet"}</option>
+        {net.rpcs.map((u) => (
+          <option key={u} value={u}>
+            {new URL(u).host}
+          </option>
+        ))}
+        <option value="custom">Your own RPC URL…</option>
+      </select>
+      {editing && (
+        <form
+          className="rpc-custom"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const u = draft.trim();
+            const ok = /^https?:\/\/\S+$/.test(u);
+            setBad(!ok);
+            if (ok) onRpc(u);
+          }}
+        >
+          <input
+            className="text-field"
+            type="url"
+            aria-label="Your RPC URL"
+            placeholder="https://…"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button type="submit" className="btn-line">
+            Use
+          </button>
+        </form>
+      )}
+      {bad && <p className="hint left">Enter a URL starting with https://</p>}
+      {editing && <p className="hint left">Saved in this browser only, never in the page's link.</p>}
+    </details>
+  );
+}
+
 export function App() {
   const startAddr = initialVaultAddress();
   const [vaultInput, setVaultInput] = useState(startAddr);
   const [vault, setVault] = useState<Address | null>(
     DEMO ? DEMO_VAULT : isAddress(startAddr) ? (startAddr as Address) : null,
   );
+  const [net, setNet] = useState(initialNetwork);
+  const [rpc, setRpc] = useState(() => savedRpc(net));
+  const conn = useMemo<Conn>(() => ({ net, rpc }), [net, rpc]);
   const [account, setAccount] = useState<Address | null>(null);
   const [status, setStatus] = useState<VaultStatus | null>(null);
   const [trust, setTrust] = useState<"genuine" | "unverified" | null>(null);
@@ -155,20 +240,46 @@ export function App() {
       return;
     }
     if (!vault) return;
-    const client = readClient();
+    const client = readClient(conn);
     if (!client) {
       setLoadError("Install a browser wallet to view and fund this vault.");
       return;
     }
     try {
-      setTrust(await checkVault(client, vault));
+      setTrust(await checkVault(client, conn, vault));
       setStatus(await loadStatus(client, vault, account ?? undefined));
       setLoadError(null);
     } catch (e) {
       setStatus(null);
       setLoadError(explain(e));
     }
-  }, [vault, account]);
+  }, [vault, account, conn]);
+
+  // Keep the link shareable: it names the network and the vault.
+  useEffect(() => {
+    if (DEMO) return;
+    const q = new URLSearchParams();
+    if (CAN_CHOOSE_NETWORK) q.set("network", net.key);
+    if (vault) q.set("vault", vault);
+    history.replaceState(null, "", `?${q}`);
+  }, [net, vault]);
+
+  function chooseNetwork(n: Network) {
+    if (n.key === net.key) return;
+    setNet(n);
+    setRpc(savedRpc(n));
+    setStatus(null);
+    setTrust(null);
+    setLoadError(null);
+    setNotice(null);
+  }
+
+  function chooseRpc(url: string) {
+    saveRpc(net, url);
+    setRpc(url);
+    setStatus(null);
+    setLoadError(null);
+  }
 
   useEffect(() => {
     refresh();
@@ -212,7 +323,6 @@ export function App() {
     }
     setVault(a as Address);
     setNotice(null);
-    history.replaceState(null, "", `?vault=${a}`);
   }
 
   const wei = (() => {
@@ -238,7 +348,7 @@ export function App() {
     }
     run("contribute", async () => {
       if (DEMO) await demo.contribute(wei);
-      else await contribute(vault, account, wei);
+      else await contribute(conn, vault, account, wei);
       setAmountIn("");
       return `Contributed ${eth(wei)} ETH.`;
     });
@@ -249,7 +359,7 @@ export function App() {
     const mine = status.mine;
     run("withdraw", async () => {
       if (DEMO) await demo.withdraw();
-      else await withdraw(vault, account);
+      else await withdraw(conn, vault, account);
       return `Withdrew ${eth(mine)} ETH.`;
     });
   };
@@ -280,6 +390,29 @@ export function App() {
           <Mark />
           CrowdVault
         </span>
+        {!DEMO && vault && (
+          <span className={`net${net.testnet ? " is-test" : ""}`}>
+            {CAN_CHOOSE_NETWORK ? (
+              <select
+                aria-label="Network"
+                value={net.key}
+                onChange={(e) => chooseNetwork(NETWORKS.find((n) => n.key === e.target.value)!)}
+              >
+                {NETWORKS.map((n) => (
+                  <option key={n.key} value={n.key}>
+                    {n.label}
+                    {n.testnet ? " (testnet)" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <>
+                {net.label}
+                {net.testnet ? " (testnet)" : ""}
+              </>
+            )}
+          </span>
+        )}
         {account ? (
           <span className="acct" title={account}>
             {short(account)}
@@ -292,24 +425,42 @@ export function App() {
       </header>
 
       {!vault && (
-        <form className="find" onSubmit={openVault}>
-          <h1>Open a vault</h1>
-          <p className="lede">Paste the vault address the organizers shared.</p>
-          <label htmlFor="vault-addr">Vault address</label>
-          <input
-            id="vault-addr"
-            className="text-field"
-            value={vaultInput}
-            onChange={(e) => setVaultInput(e.target.value)}
-            placeholder="0x…"
-            spellCheck={false}
-            autoComplete="off"
-          />
-          <button type="submit" className="btn btn-wax">
-            Open vault
-          </button>
-          {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
-        </form>
+        <>
+          <form className="find" onSubmit={openVault}>
+            <h1>Open a vault</h1>
+            <p className="lede">Choose the network, then paste the vault address the organizers shared.</p>
+            {CAN_CHOOSE_NETWORK && (
+              <>
+                <span className="label">Network</span>
+                <NetworkPicker net={net} onChange={chooseNetwork} />
+              </>
+            )}
+            <label htmlFor="vault-addr">Vault address</label>
+            <input
+              id="vault-addr"
+              className="text-field"
+              value={vaultInput}
+              onChange={(e) => setVaultInput(e.target.value)}
+              placeholder="0x…"
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <button type="submit" className="btn btn-wax">
+              Open vault
+            </button>
+            {net.testnet && <p className="hint left">{net.label} is a test network: its ETH has no value.</p>}
+            {notice && <p className={`notice ${notice.kind}`}>{notice.text}</p>}
+            {DEMO_BUTTON && (
+              <div className="demo-cta">
+                <p>No vault yet? Walk through every stage of a campaign with pretend funds.</p>
+                <a className="btn-line" href="?demo">
+                  Demo mode
+                </a>
+              </div>
+            )}
+          </form>
+          <Connection key={net.key} conn={conn} onRpc={chooseRpc} />
+        </>
       )}
 
       {vault && loadError && <p className="notice err">{loadError}</p>}
@@ -319,8 +470,8 @@ export function App() {
         <main>
           {trust === "unverified" && !DEMO && (
             <p className="notice warn">
-              This page can't confirm the vault is genuine, because no vault factory is configured. Only contribute if
-              you trust the link you followed.
+              This page can't confirm the vault is genuine, because no vault factory is configured for {net.label}.
+              Only contribute if you trust the link you followed.
             </p>
           )}
           <section className="hero">
@@ -496,12 +647,22 @@ export function App() {
               <code>yourfile.meta.json</code> with it; it holds the sealed key that opens it.
             </p>
           </details>
+          {!DEMO && <Connection key={net.key} conn={conn} onRpc={chooseRpc} />}
         </main>
       )}
+      {vault && !s && !DEMO && <Connection key={net.key} conn={conn} onRpc={chooseRpc} />}
 
       {DEMO && (
         <nav className="demo-bar" aria-label="Demo controls">
-          <span>Demo vault with pretend funds</span>
+          <span>
+            Demo vault with pretend funds
+            {DEMO_BUTTON && (
+              <>
+                {" · "}
+                <a href="?">Exit demo</a>
+              </>
+            )}
+          </span>
           <div className="seg">
             {(
               [

@@ -111,7 +111,7 @@ cast call $VAULT "keyAddress()(address)" --rpc-url $RPC_URL              # match
 cast call $FACTORY "isVault(address)(bool)" $VAULT --rpc-url $RPC_URL    # true
 ```
 
-The contracts appear on [sepolia.etherscan.io](https://sepolia.etherscan.io). Now run the rest of the campaign there: point a local vault page at it (`VITE_CHAIN_ID=11155111`), seal a file, contribute from a second account, claim, and open the file. The [coordinator guide](coordinator.md) walks through each step. If anything surprises you, fix it here, not on mainnet.
+The contracts appear on [sepolia.etherscan.io](https://sepolia.etherscan.io). Now run the rest of the campaign there: open the vault page with **Sepolia** selected (or `?network=sepolia&vault=0x…` in its link), seal a file, contribute from a second account, claim, and open the file. The [coordinator guide](coordinator.md) walks through each step. If anything surprises you, fix it here, not on mainnet.
 
 ## 2. Deploy to Ethereum mainnet
 
@@ -175,4 +175,4 @@ This costs about 1,246,000 gas, roughly 40% of a first deployment. Use a new cam
 
 ## Other chains
 
-The same commands work on any EVM chain Foundry supports, including layer 2s such as Base, Optimism and Arbitrum, where the same gas usually costs a small fraction of mainnet. Deploy a separate factory on each chain, and set the page's `VITE_CHAIN_ID` to match. Backers need ETH on that chain to take part.
+The same commands work on any EVM chain Foundry supports, including layer 2s such as Base, Optimism and Arbitrum, where the same gas usually costs a small fraction of mainnet. Deploy a separate factory on each chain. The page offers only Ethereum and Sepolia by default, so for another chain, build it with `VITE_CHAIN_ID` set to match (see step 5 of the coordinator guide). Backers need ETH on that chain to take part.

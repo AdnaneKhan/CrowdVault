@@ -9,7 +9,7 @@ Every command here is exercised by `scripts/e2e.sh` on a local chain.
 - A computer you trust to hold the campaign secret, ideally one you can keep offline between steps.
 - Rust, to build `vault-seal` (and `vault-open`, which backers and creators use to check and open files). Foundry (`forge` and `cast`), to deploy and talk to the vault. Node.js 18 or later, only if you host the vault page yourself.
 - An RPC URL for your chain, from a provider or your own node.
-- A deployer account with a little ETH for gas.
+- A deployer account with ETH for gas. A first deployment uses about 3.1 million gas; [Gas and cost](deploying.md#gas-and-cost) turns that into ETH.
 - A recipient address, where the money goes. It can be a multisig.
 - Your numbers: the goal, and how long you'll have to claim once it's reached.
 
@@ -27,7 +27,7 @@ From the root of this repo:
 ```bash
 cargo install --path vault-seal      # puts vault-seal and vault-open on your PATH
 vault-seal --help
-cd contracts && forge test           # optional: 25 tests should pass
+cd contracts && forge test           # optional: every test should pass
 ```
 
 On macOS, also sign both tools with the hardened runtime, so no other program can read its memory while it holds keys. Rebuilding removes the signature, so repeat this after each build; each tool reminds you if its build isn't signed.
@@ -84,6 +84,8 @@ The 30-day cap protects backers: once the goal is reached, their money can never
 
 Do a full run on a testnet such as Sepolia first, with a tiny goal and a short window: deploy, contribute, claim, open.
 
+**[Deploying the contracts](deploying.md)** covers this step in full: testnet and mainnet one after the other, gas and cost estimates, hardware wallets, and what to do if a deployment is interrupted. The short version follows.
+
 Vaults are created through a factory, which records which addresses are genuine vaults; the vault page only shows those. The first deployment creates the factory. Keep its address and pass it as `FACTORY` for every later vault, so they all share one factory.
 
 ```bash
@@ -116,12 +118,7 @@ cast call $FACTORY "isVault(address)(bool)" $VAULT --rpc-url $RPC_URL     # true
 
 The key address must match the `keyAddress` line from `keygen`, ignoring upper and lower case. If it doesn't, stop and deploy again.
 
-Optionally, publish the source on Etherscan so backers can read the code. Verify the factory; vaults it creates can then be matched to the same code.
-
-```bash
-forge verify-contract $FACTORY src/CrowdVaultFactory.sol:CrowdVaultFactory --chain mainnet \
-  --etherscan-api-key $ETHERSCAN_API_KEY
-```
+Optionally, publish the source on Etherscan so backers can read the code: see [Publishing the source](deploying.md#publishing-the-source).
 
 ## 5. Put the vault page online
 
@@ -239,7 +236,7 @@ The key is on-chain and on the vault page. Announce it and point people to the "
 - [ ] Tools installed, and `vault-seal --help` works
 - [ ] `campaign.secret` generated and backed up offline
 - [ ] Settings chosen
-- [ ] Full test run on a testnet
+- [ ] Full test run on a testnet ([Deploying the contracts](deploying.md))
 - [ ] Vault deployed through the factory, its `keyAddress` matches, and `isVault` is true
 - [ ] Vault page online, with `VITE_CHAIN_ID` and `VITE_FACTORY_ADDRESS` set
 - [ ] Creators briefed, and the list of sealed files published

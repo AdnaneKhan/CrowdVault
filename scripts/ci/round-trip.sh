@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Round trip used by CI on Linux, macOS and Windows (Git Bash).
 #
-#   round-trip.sh seal <vault-seal> <dir>
+# <bin> is the directory holding the vault-seal and vault-open binaries.
+#
+#   round-trip.sh seal <bin> <dir>
 #       Seal sample files into <dir> under the shared test key: an empty
 #       file, one byte, exactly one chunk, 5 MB (several batches) and a
 #       proven text file. The originals are kept in <dir>/originals.
-#   round-trip.sh open <vault-seal> <dir>...
+#   round-trip.sh open <bin> <dir>...
 #       Verify every sample sealed into each <dir> (the proven one must
 #       verify as PROVEN), open it, and compare it with the original.
 #
@@ -16,9 +18,13 @@ TEST_SECRET=0x1111111111111111111111111111111111111111111111111111111111111111
 PLAIN="empty.bin one.bin chunk.bin big.bin"
 PROVEN=proven.txt
 
-mode=${1:?usage: round-trip.sh seal|open <vault-seal> <dir>...}
-vs=${2:?missing the vault-seal binary}
+mode=${1:?usage: round-trip.sh seal|open <bin> <dir>...}
+bin=${2:?missing the directory holding vault-seal and vault-open}
 shift 2
+exe=
+[ -f "$bin/vault-seal.exe" ] && exe=.exe
+vs=$bin/vault-seal$exe
+vo=$bin/vault-open$exe
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -52,7 +58,7 @@ case $mode in
         [ -f "$meta" ] || { echo "FAIL: $meta is missing" >&2; exit 1; }
         want=OK
         [ "$f" = "$PROVEN" ] && want=PROVEN
-        if ! report=$("$vs" verify --campaign-key "$key" "$meta"); then
+        if ! report=$("$vo" verify --campaign-key "$key" "$meta"); then
           echo "FAIL: $meta does not verify (the error is above)" >&2
           exit 1
         fi
@@ -61,7 +67,7 @@ case $mode in
           "$want":*) ;;
           *) echo "FAIL: verify $meta: expected $want, got: $verdict" >&2; exit 1 ;;
         esac
-        "$vs" open --secret-file "$work/test.secret" "$meta" --out-dir "$out" > /dev/null ||
+        "$vo" open --secret-file "$work/test.secret" "$meta" --out-dir "$out" > /dev/null ||
           { echo "FAIL: $meta does not open (the error is above)" >&2; exit 1; }
         cmp -s "$dir/originals/$f" "$out/$f" || { echo "FAIL: $dir/$f does not open to the original" >&2; exit 1; }
         echo "ok  $dir/$f ($want)"

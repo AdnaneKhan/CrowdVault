@@ -4,24 +4,25 @@ You make something, seal it to the campaign key, and share it. You never handle 
 
 ## What you need
 
-- `vault-seal` (install it below)
+- `vault-seal` to seal, and `vault-open` to check and open (install both below)
 - The vault address, from the campaign coordinator
 - Your files, of any type and any size
 
-## 1. Install vault-seal
+## 1. Install the tools
 
-Install Rust, then build `vault-seal` from this repo. This works on macOS, Linux and Windows. Building needs a C toolchain, which Rust's installer already asks for: Xcode command-line tools on macOS, build-essential on Linux, Visual Studio Build Tools on Windows.
+Install Rust, then build `vault-seal` and `vault-open` from this repo. This works on macOS, Linux and Windows. Building needs a C toolchain, which Rust's installer already asks for: Xcode command-line tools on macOS, build-essential on Linux, Visual Studio Build Tools on Windows.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-cargo install --path vault-seal      # run from the root of this repo
+cargo install --path vault-seal      # run from the root of this repo; installs both tools
 vault-seal --help
 ```
 
-On macOS, also sign the tool with the hardened runtime, so no other program can read its memory while it holds keys. Rebuilding removes the signature, so repeat this after each build; `vault-seal` reminds you if a build isn't signed.
+On macOS, also sign both tools with the hardened runtime, so no other program can read its memory while it holds keys. Rebuilding removes the signature, so repeat this after each build; each tool reminds you if its build isn't signed.
 
 ```bash
 codesign --force --options runtime --sign - "$(which vault-seal)"
+codesign --force --options runtime --sign - "$(which vault-open)"
 ```
 
 ## 2. Get the campaign key
@@ -40,7 +41,7 @@ KY=$(cast call $VAULT "keyY()" --rpc-url $RPC_URL)
 export CAMPAIGN_KEY=04${KX#0x}${KY#0x}
 ```
 
-The page shows a short form of the key (starting 02 or 03), and the chain gives a long form (starting 04). `vault-seal` accepts either.
+The page shows a short form of the key (starting 02 or 03), and the chain gives a long form (starting 04). Both tools accept either.
 
 ## 3. Seal your file
 
@@ -68,7 +69,7 @@ for f in art/*; do vault-seal seal --campaign-key $CAMPAIGN_KEY "$f" --out-dir s
 ## 4. Check before you share
 
 ```bash
-vault-seal verify --campaign-key $CAMPAIGN_KEY sealed/artwork.png.meta.json
+vault-open verify --campaign-key $CAMPAIGN_KEY sealed/artwork.png.meta.json
 ```
 
 `OK` means the key this vault reveals will open your file, and the `.enc` file matches its metadata byte for byte. Keep your original file: nobody can open the sealed copy before the unlock, including you.
@@ -77,7 +78,7 @@ vault-seal verify --campaign-key $CAMPAIGN_KEY sealed/artwork.png.meta.json
 
 - Upload both files anywhere that works for you: your website, IPFS, a torrent, cloud storage, Discord.
 - Send the coordinator both links, so your work appears on the campaign's list.
-- Keep each pair together. `vault-seal open` looks for the `.enc` file next to the `.meta.json` with the matching name. You can rename both on disk; whoever opens them then points to the `.enc` with `--encrypted`.
+- Keep each pair together. `vault-open open` looks for the `.enc` file next to the `.meta.json` with the matching name. You can rename both on disk; whoever opens them then points to the `.enc` with `--encrypted`.
 - Never edit the values inside a `.meta.json`. They are sealed in, and any change stops the file from opening.
 
 ## Optional: seal with a proof (small files)
@@ -102,7 +103,7 @@ Proven files work everywhere ordinary ones do: `verify` checks the proof automat
 
 ## 6. What backers can and can't check
 
-Before the unlock, anyone can confirm with `verify` that the vault's key will open your file. For an ordinary sealed file, they can't see what's inside, so they're trusting you that it's what you promised. For a proven file, `verify` also proves it opens to a file with the committed fingerprint, which is exactly the work if that fingerprint was published for it. After the unlock, if a file doesn't match the fingerprint in its metadata, `vault-seal` reports it as the creator's fault, and anyone can reproduce that.
+Before the unlock, anyone can confirm with `verify` that the vault's key will open your file. For an ordinary sealed file, they can't see what's inside, so they're trusting you that it's what you promised. For a proven file, `verify` also proves it opens to a file with the committed fingerprint, which is exactly the work if that fingerprint was published for it. After the unlock, if a file doesn't match the fingerprint in its metadata, `vault-open` reports it as the creator's fault, and anyone can reproduce that.
 
 ## 7. After the unlock
 
@@ -110,7 +111,7 @@ The key appears on the vault page, with a copy button. You can also read it from
 
 ```bash
 KEY=$(cast to-hex "$(cast call $VAULT 'revealedKey()(uint256)' --rpc-url $RPC_URL | awk '{print $1}')")
-vault-seal open --secret $KEY sealed/artwork.png.meta.json --out-dir opened
+vault-open open --secret $KEY sealed/artwork.png.meta.json --out-dir opened
 ```
 
 Before the unlock, `revealedKey()` returns 0.

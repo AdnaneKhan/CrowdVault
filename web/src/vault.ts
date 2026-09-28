@@ -89,7 +89,7 @@ export function compressKey(x: bigint, y: bigint): string {
   return (y & 1n ? "03" : "02") + x.toString(16).padStart(64, "0");
 }
 
-/** The revealed scalar as 32-byte hex, the form `vault-seal open --secret` takes. */
+/** The revealed scalar as 32-byte hex, the form `vault-open open --secret` takes. */
 export function keyHex(k: bigint): string {
   return toHex(k, { size: 32 });
 }

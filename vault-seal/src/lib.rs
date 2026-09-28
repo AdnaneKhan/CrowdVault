@@ -1,4 +1,5 @@
-//! vault-seal: creator tooling for CrowdVault.
+//! The library behind the CrowdVault tools: `vault-seal` (creators and the
+//! coordinator) and `vault-open` (backers).
 //!
 //! Sealing turns one file into two:
 //!

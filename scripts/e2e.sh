@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # End-to-end run on a local anvil chain, following docs/coordinator.md and
 # docs/creators.md step by step. Every check fails the run if it doesn't hold.
-# Set VAULT_SEAL to a vault-seal binary to skip building one.
+# Set VAULT_SEAL and VAULT_OPEN to the two binaries to skip building them.
 set -euo pipefail
 export PATH=$HOME/.cargo/bin:$HOME/.foundry/bin:$PATH
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 fail() { echo "FAIL: $*" >&2; exit 1; }
 expect() { [ "$1" = "$2" ] || fail "$3: expected $2, got $1"; }
 
-if [ -n "${VAULT_SEAL:-}" ]; then
+if [ -n "${VAULT_SEAL:-}" ] && [ -n "${VAULT_OPEN:-}" ]; then
   VS=$VAULT_SEAL
+  VO=$VAULT_OPEN
 else
   (cd "$ROOT/vault-seal" && cargo build --release -q)
   VS=$ROOT/vault-seal/target/release/vault-seal
+  VO=$ROOT/vault-seal/target/release/vault-open
 fi
 W=$(mktemp -d); cd "$W"
 export RPC_URL=http://127.0.0.1:8545
@@ -71,7 +73,7 @@ echo "published fingerprint: $($VS fingerprint poem.txt)"
 
 echo "== Backer: verify against the vault's key, then contribute"
 for f in note.txt film.bin poem.txt; do
-  REPORT=$($VS verify --campaign-key "$CAMPAIGN_KEY" "sealed/$f.meta.json")
+  REPORT=$($VO verify --campaign-key "$CAMPAIGN_KEY" "sealed/$f.meta.json")
   echo "${REPORT%%$'\n'*}"
 done
 cast send "$VAULT" "contribute()" --value 6ether --private-key $BACKER_KEY --rpc-url $RPC_URL > /dev/null
@@ -93,7 +95,7 @@ echo "phase: $PHASE (2 = Claimed), released $RELEASED ETH"
 echo "== Everyone: read the key from the vault and open"
 KEY=$(cast to-hex "$(cast call "$VAULT" 'revealedKey()(uint256)' --rpc-url $RPC_URL | awk '{print $1}')")
 for f in note.txt film.bin poem.txt; do
-  $VS open --secret "$KEY" "sealed/$f.meta.json" --out-dir opened > /dev/null
+  $VO open --secret "$KEY" "sealed/$f.meta.json" --out-dir opened > /dev/null
   cmp -s "$f" "opened/$f" || fail "opened $f differs from the original"
   echo "opened $f: identical to the original"
 done

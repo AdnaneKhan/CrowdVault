@@ -58,7 +58,7 @@ pub struct ZkMetadata {
     pub file_name: String,
     pub plaintext_len: u64,
     /// Proven. Anyone holding the original recomputes it with
-    /// `vault-seal fingerprint`.
+    /// `vault-seal fingerprint` or `vault-open fingerprint`.
     pub fingerprint: String,
     pub ciphertext_len: u64,
     pub ciphertext_sha256: String,

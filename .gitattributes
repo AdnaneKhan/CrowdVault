@@ -1,0 +1,3 @@
+# LF line endings everywhere, Windows checkouts included: CI runs the shell
+# scripts under Git Bash on Windows, and bash rejects CRLF scripts.
+* text=auto eol=lf

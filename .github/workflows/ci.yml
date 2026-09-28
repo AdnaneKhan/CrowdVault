@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Backtraces for test panics, not for the CLI's ordinary error messages.
+  RUST_LIB_BACKTRACE: 0
+  # The Foundry release the contracts and scripts were last verified with.
+  FOUNDRY_VERSION: v1.8.3
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  contracts:
+    name: Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
+      - name: Build
+        working-directory: contracts
+        run: forge build --sizes
+      - name: Test
+        working-directory: contracts
+        run: forge test -vvv
+      - name: Web app's ABI matches the contracts
+        run: |
+          python3 scripts/gen-abi.py
+          if ! git diff --exit-code -- web/src/abi.ts; then
+            echo "::error file=web/src/abi.ts::out of date with the contracts: run forge build in contracts/, then python3 scripts/gen-abi.py"
+            exit 1
+          fi
+
+  vault-seal:
+    name: vault-seal on ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux, exe: vault-seal }
+          - { os: macos-latest, platform: macos, exe: vault-seal }
+          - { os: windows-latest, platform: windows, exe: vault-seal.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vault-seal
+      - name: Test
+        working-directory: vault-seal
+        run: cargo test --release
+      - name: Build
+        working-directory: vault-seal
+        run: cargo build --release
+      - name: Hardened-runtime reminder, then signing
+        if: runner.os == 'macOS'
+        run: bash scripts/ci/check-macos-signing.sh vault-seal/target/release/vault-seal
+      - name: Seal sample files
+        run: bash scripts/ci/round-trip.sh seal vault-seal/target/release/${{ matrix.exe }} sealed-${{ matrix.platform }}
+      - name: Open them again here
+        run: bash scripts/ci/round-trip.sh open vault-seal/target/release/${{ matrix.exe }} sealed-${{ matrix.platform }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sealed-${{ matrix.platform }}
+          path: sealed-${{ matrix.platform }}
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vault-seal-${{ matrix.platform }}
+          path: vault-seal/target/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+  cross-platform:
+    name: Open other platforms' files on ${{ matrix.platform }}
+    needs: vault-seal
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux, exe: vault-seal }
+          - { os: macos-latest, platform: macos, exe: vault-seal }
+          - { os: windows-latest, platform: windows, exe: vault-seal.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: vault-seal-${{ matrix.platform }}
+          path: bin
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: sealed-*
+          path: sealed
+      - name: Verify and open what the other two platforms sealed
+        run: |
+          chmod +x "bin/${{ matrix.exe }}"
+          others=()
+          for dir in sealed/sealed-*; do
+            [ "$dir" = "sealed/sealed-${{ matrix.platform }}" ] || others+=("$dir")
+          done
+          if [ "${#others[@]}" -ne 2 ]; then
+            echo "::error::expected files sealed on 2 other platforms, found ${#others[@]}"
+            exit 1
+          fi
+          bash scripts/ci/round-trip.sh open "bin/${{ matrix.exe }}" "${others[@]}"
+
+  end-to-end:
+    name: End to end on a local chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vault-seal
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: ${{ env.FOUNDRY_VERSION }}
+      - name: Deploy, contribute, claim and open
+        run: bash scripts/e2e.sh
+
+  web:
+    name: Web app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Type-check and build
+        working-directory: web
+        run: npm run build
+      - name: Build the single-file demo
+        working-directory: web
+        run: npm run build:demo

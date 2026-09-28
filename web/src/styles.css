@@ -434,12 +434,6 @@ code {
   padding: 1.35rem 1.25rem 1.25rem;
   box-shadow: var(--shadow);
 }
-label {
-  display: block;
-  font-weight: 650;
-  font-size: 0.95rem;
-  margin-bottom: 0.35rem;
-}
 .amount-field {
   display: flex;
   align-items: baseline;
@@ -813,4 +807,85 @@ pre {
     transition-duration: 1ms !important;
     transition-delay: 0ms !important;
   }
+}
+
+/* ---------- network and connection */
+label,
+.label {
+  display: block;
+  font-weight: 650;
+  font-size: 0.95rem;
+  margin-bottom: 0.35rem;
+}
+.seg-net {
+  grid-template-columns: repeat(2, 1fr);
+  width: 100%;
+  margin-bottom: 1.1rem;
+}
+.seg-net button {
+  font-size: 0.92rem;
+  padding: 0.6rem 0.4rem;
+}
+.seg-note {
+  font-weight: 500;
+  color: var(--mute);
+}
+.net {
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: var(--mute);
+  border: 1.5px solid var(--line);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+}
+.net.is-test {
+  color: var(--brass);
+  border-color: color-mix(in srgb, var(--brass) 55%, var(--line));
+}
+.net select {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+.net select:focus-visible {
+  outline: 2px solid var(--brass);
+  outline-offset: 3px;
+}
+.connection select.text-field {
+  appearance: auto;
+  box-sizing: border-box;
+}
+.rpc-custom {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+.rpc-custom .btn-line {
+  flex: none;
+  margin-top: 0.3rem;
+}
+.demo-cta {
+  margin-top: 2rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.demo-cta p {
+  margin: 0;
+  color: var(--mute);
+  font-size: 0.95rem;
+}
+.demo-cta .btn-line {
+  flex: none;
+  text-decoration: none;
+}
+.demo-bar a {
+  color: var(--ink);
+  font-weight: 650;
 }

@@ -4,6 +4,7 @@ import {
   createPublicClient,
   createWalletClient,
   custom,
+  fallback,
   http,
   isAddress,
   parseEther,
@@ -14,6 +15,7 @@ import {
   type WalletClient,
 } from "viem";
 import { crowdVaultAbi, factoryAbi } from "./abi";
+import { chainName, type Network } from "./networks";
 
 declare global {
   interface Window {
@@ -21,8 +23,9 @@ declare global {
   }
 }
 
-export const Phase = { Open: 0, Locked: 1, Claimed: 2, Expired: 3 } as const;
-export type PhaseValue = (typeof Phase)[keyof typeof Phase];
+import { Phase, type PhaseValue } from "./phase";
+
+export { Phase, type PhaseValue };
 
 export type VaultStatus = {
   phase: PhaseValue;
@@ -41,35 +44,26 @@ export type VaultStatus = {
 const env = import.meta.env;
 const params = new URLSearchParams(location.search);
 
-/** Demo mode: the demo build, or ?demo on the dev server. Never on a real deployment. */
-export const DEMO = env.VITE_DEFAULT_DEMO === "1" || (env.DEV && params.has("demo"));
+/** The demo build always runs the demo. Pages built with VITE_DEMO_BUTTON (and the dev server) offer it as ?demo. */
+const DEMO_BUILD = env.VITE_DEFAULT_DEMO === "1";
+export const DEMO_BUTTON = !DEMO_BUILD && (env.DEV || env.VITE_DEMO_BUTTON === "1");
+/** Demo mode: a pretend vault, with no wallet or network involved. */
+export const DEMO = DEMO_BUILD || (DEMO_BUTTON && params.has("demo"));
 
-/** The chain this page serves. Transactions are refused anywhere else. */
-export const CHAIN_ID = env.VITE_CHAIN_ID ? Number(env.VITE_CHAIN_ID) : undefined;
-
-/** Only vaults this factory created are shown. */
-const FACTORY = env.VITE_FACTORY_ADDRESS as string | undefined;
-export const HAS_FACTORY = !!FACTORY && isAddress(FACTORY);
-
-const CHAIN_NAMES: Record<number, string> = {
-  1: "Ethereum",
-  10: "OP Mainnet",
-  8453: "Base",
-  42161: "Arbitrum One",
-  11155111: "Sepolia",
-  31337: "the local test network",
-};
-const chainName = (id: number) => CHAIN_NAMES[id] ?? `network ${id}`;
+/** Which network to use, and how to reach it: a custom RPC URL, or "" for the network's own list. */
+export type Conn = { net: Network; rpc: string };
 
 /** An error whose message is already written for people. */
 export class UserFacingError extends Error {}
 
 const ZERO = "0x0000000000000000000000000000000000000000" as const;
 
-export function readClient(): PublicClient | null {
-  const rpc = env.VITE_RPC_URL as string | undefined;
-  if (rpc) return createPublicClient({ transport: http(rpc) });
-  if (window.ethereum) return createPublicClient({ transport: custom(window.ethereum) });
+/** Reads go through the RPCs, so visitors without a wallet can see the vault. */
+export function readClient({ net, rpc }: Conn): PublicClient | null {
+  const urls = rpc ? [rpc] : net.rpcs;
+  if (urls.length === 1) return createPublicClient({ chain: net.chain, transport: http(urls[0]) });
+  if (urls.length > 1) return createPublicClient({ chain: net.chain, transport: fallback(urls.map((u) => http(u))) });
+  if (window.ethereum) return createPublicClient({ chain: net.chain, transport: custom(window.ethereum) });
   return null;
 }
 
@@ -99,20 +93,22 @@ export function keyHex(k: bigint): string {
  * code, and created by this site's factory (so it runs genuine CrowdVault
  * code, not a lookalike).
  */
-export async function checkVault(client: PublicClient, vault: Address): Promise<"genuine" | "unverified"> {
-  if (CHAIN_ID !== undefined) {
-    const id = await client.getChainId();
-    if (id !== CHAIN_ID) {
-      throw new UserFacingError(`Your wallet is on ${chainName(id)}. Switch it to ${chainName(CHAIN_ID)} to see this vault.`);
-    }
+export async function checkVault(client: PublicClient, { net, rpc }: Conn, vault: Address): Promise<"genuine" | "unverified"> {
+  const id = await client.getChainId();
+  if (id !== net.chain.id) {
+    throw new UserFacingError(
+      rpc || net.rpcs.length
+        ? `That connection serves ${chainName(id)}, not ${net.label}. Check the RPC under Connection.`
+        : `Your wallet is on ${chainName(id)}. Switch it to ${net.label} to see this vault.`,
+    );
   }
   const code = await client.getCode({ address: vault });
   if (!code || code === "0x") {
-    throw new UserFacingError("No vault at this address on this network. Check the address, or switch networks in your wallet.");
+    throw new UserFacingError(`No vault at this address on ${net.label}. Check the address and the network.`);
   }
-  if (!HAS_FACTORY) return "unverified";
+  if (!net.factory) return "unverified";
   const genuine = await client.readContract({
-    address: FACTORY as Address,
+    address: net.factory,
     abi: factoryAbi,
     functionName: "isVault",
     args: [vault],
@@ -131,7 +127,13 @@ export async function loadStatus(client: PublicClient, vault: Address, who?: Add
     client.readContract({ ...base, functionName: "keyX" }),
     client.readContract({ ...base, functionName: "keyY" }),
     client.readContract({ ...base, functionName: "claimWindow" }),
-  ]);
+  ]).catch((e) => {
+    // Without a factory to vouch for it, the address may be some other contract.
+    if (e instanceof BaseError && e.walk((c) => c instanceof ContractFunctionRevertedError)) {
+      throw new UserFacingError("This address isn't a CrowdVault. Check the address and the network.");
+    }
+    throw e;
+  });
   const [phase, total, threshold, deadline, mine, revealedKey, now, released] = s;
   return {
     phase: phase as PhaseValue,
@@ -155,31 +157,37 @@ export async function connect(): Promise<Address> {
   return account;
 }
 
-/** Make sure the wallet is on this page's chain before any transaction. */
-async function ensureChain(w: WalletClient) {
-  if (CHAIN_ID === undefined) return;
-  if ((await w.getChainId()) === CHAIN_ID) return;
+/** Make sure the wallet is on the chosen network before any transaction. */
+async function ensureChain(w: WalletClient, net: Network) {
+  const id = net.chain.id;
+  if ((await w.getChainId()) === id) return;
+  const fail = () => new UserFacingError(`Switch your wallet to ${net.label} to continue.`);
   try {
-    await w.switchChain({ id: CHAIN_ID });
-  } catch {
-    throw new UserFacingError(`Switch your wallet to ${chainName(CHAIN_ID)} to continue.`);
+    await w.switchChain({ id });
+  } catch (e) {
+    // 4902: the wallet doesn't know this network yet (often the case for testnets).
+    if (!(e instanceof BaseError && e.walk((c) => (c as { code?: number }).code === 4902))) throw fail();
+    try {
+      await w.addChain({ chain: net.chain });
+      await w.switchChain({ id });
+    } catch {
+      throw fail();
+    }
   }
-  if ((await w.getChainId()) !== CHAIN_ID) {
-    throw new UserFacingError(`Switch your wallet to ${chainName(CHAIN_ID)} to continue.`);
-  }
+  if ((await w.getChainId()) !== id) throw fail();
 }
 
-function clients() {
+function clients(conn: Conn) {
   const w = walletClient();
-  const r = readClient();
+  const r = readClient(conn);
   if (!w || !r) throw new UserFacingError("No browser wallet found.");
   return { w, r };
 }
 
 // The simulation runs first, so reverts surface before the wallet asks to sign.
-export async function contribute(vault: Address, account: Address, wei: bigint) {
-  const { w, r } = clients();
-  await ensureChain(w);
+export async function contribute(conn: Conn, vault: Address, account: Address, wei: bigint) {
+  const { w, r } = clients(conn);
+  await ensureChain(w, conn.net);
   const { request } = await r.simulateContract({
     address: vault,
     abi: crowdVaultAbi,
@@ -192,9 +200,9 @@ export async function contribute(vault: Address, account: Address, wei: bigint) 
   return hash;
 }
 
-export async function withdraw(vault: Address, account: Address) {
-  const { w, r } = clients();
-  await ensureChain(w);
+export async function withdraw(conn: Conn, vault: Address, account: Address) {
+  const { w, r } = clients(conn);
+  await ensureChain(w, conn.net);
   const { request } = await r.simulateContract({ address: vault, abi: crowdVaultAbi, functionName: "withdraw", account });
   const hash = await w.writeContract({ ...request, account, chain: null });
   await r.waitForTransactionReceipt({ hash });
@@ -218,7 +226,7 @@ export function explain(err: unknown): string {
       if (name && ERROR_TEXT[name]) return ERROR_TEXT[name];
     }
     if (err.name === "HttpRequestError" || err.name === "TimeoutError")
-      return "Can't reach the network. Check your connection, or the RPC URL if one is configured.";
+      return "Can't reach the network. Check your internet connection, or choose another RPC under Connection.";
     if (/user (rejected|denied)/i.test(err.message)) return "You cancelled the transaction in your wallet.";
     return err.shortMessage;
   }

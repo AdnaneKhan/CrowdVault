@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { Phase, type PhaseValue } from "./vault";
+import { Phase, type PhaseValue } from "./phase";
 
 const SIZE = 320;
 const C = SIZE / 2;
@@ -46,12 +46,14 @@ const BITS = [
  * while open, drains through the claim window while locked, and the seal
  * cracks open when the key is released.
  */
-export function Seal({ phase, fill }: { phase: PhaseValue; fill: number }) {
-  const [f, setF] = useState(0);
+export function Seal({ phase, fill, still = false }: { phase: PhaseValue; fill: number; still?: boolean }) {
+  const clamped = Math.max(0, Math.min(1, fill));
+  // Normally the dial sweeps up to `fill`; `still` draws it there from the start (for the static README image).
+  const [f, setF] = useState(still ? clamped : 0);
   useEffect(() => {
-    const id = requestAnimationFrame(() => setF(Math.max(0, Math.min(1, fill))));
+    const id = requestAnimationFrame(() => setF(clamped));
     return () => cancelAnimationFrame(id);
-  }, [fill]);
+  }, [clamped]);
 
   const cls = [
     "seal",

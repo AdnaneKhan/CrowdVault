@@ -11,9 +11,10 @@ Guidance for AI coding agents (and humans) working in this repo. Read [README.md
 | `vault-seal/src/bin/vault-seal.rs` | Creator and coordinator CLI: `keygen`, `pubkey`, `seal`, `fingerprint` | |
 | `vault-seal/src/bin/vault-open.rs` | Backer CLI: `verify`, `open`, `fingerprint` | |
 | `vault-seal/src/bin/common/` | Code both binaries share: process hardening, the wiping allocator, metadata loading | |
-| `web/` | The vault page: React + viem, static build | Node 22 in CI |
+| `web/` | The vault page: React + viem, static build. `src/networks.ts` holds the networks and their public RPCs | Node 22 in CI |
 | `scripts/e2e.sh` | The whole flow on a local anvil chain, following the guides | Foundry + Rust |
 | `scripts/ci/` | CI helpers: cross-platform round trip, macOS signing check | bash (Git Bash on Windows) |
+| `.github/workflows/pages.yml` | Publishes `web/` to GitHub Pages on every push to `main` that touches it | |
 | `docs/` | User guides (`coordinator.md`, `creators.md`, `deploying.md`) and technical docs (`design.md`, `performance.md`) | |
 
 ## Build and test
@@ -46,6 +47,12 @@ Before finishing a change, run the checks for every part you touched. CI (`.gith
 - A command that handles a secret must call `warn_if_not_hardened()` before it touches the secret.
 - Print to stdout with the `out!` macro from `common`, not `println!`, so a closed pipe doesn't panic.
 - Put creator and coordinator features in `vault-seal`, and backer features in `vault-open`. Shared helpers go in `src/bin/common/`; library logic goes in `src/lib.rs`.
+
+**The web page**
+- Without `VITE_CHAIN_ID`, visitors choose Ethereum or Sepolia; with it, the page serves only that chain. Keep both modes working.
+- Public RPCs in `src/networks.ts` must answer browsers (CORS) without an API key. Check each one before adding it.
+- Demo mode must never touch a wallet or a network. It's only offered where `VITE_DEMO_BUTTON=1` (the Pages build), on the dev server, and in the single-file demo build.
+- `docs/assets/seal.svg`, the README image, is rendered from `src/Seal.tsx`. After changing the seal, run `npm run seal-svg` in `web/` and commit the result.
 
 **Scripts and docs**
 - `scripts/e2e.sh` runs the commands from `docs/coordinator.md` and `docs/creators.md`. When you change a command or its output, update the guides and the script together.

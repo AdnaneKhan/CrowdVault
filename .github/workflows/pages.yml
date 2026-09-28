@@ -1,0 +1,68 @@
+name: Pages
+
+# Publishes the vault page to GitHub Pages. Visitors choose Ethereum or
+# Sepolia, paste a vault address, or try the demo. To mark vaults from your
+# factories as genuine, set the repository variables FACTORY_MAINNET and
+# FACTORY_SEPOLIA (Settings → Secrets and variables → Actions → Variables).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - web/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; never cancel one halfway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build the page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - id: pages
+        uses: actions/configure-pages@v6
+      - name: Install
+        working-directory: web
+        run: npm ci
+      - name: Build
+        working-directory: web
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+          VITE_DEMO_BUTTON: "1"
+          VITE_FACTORY_MAINNET: ${{ vars.FACTORY_MAINNET }}
+          VITE_FACTORY_SEPOLIA: ${{ vars.FACTORY_SEPOLIA }}
+        run: npm run build -- --base="$BASE_PATH/"
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: web/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

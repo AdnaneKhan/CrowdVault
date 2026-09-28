@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="docs/assets/seal.svg" width="220" alt="CrowdVault's wax seal: a keyhole seal ringed by a dial that fills as the campaign is funded">
+</p>
+
 # CrowdVault
 
 Crowdfunding where the reward unlocks the moment the money does.
+
+**[Open the vault page](https://adnanekhan.github.io/CrowdVault/)**, or **[try the demo](https://adnanekhan.github.io/CrowdVault/?demo)** with pretend funds.
 
 Creators lock their work (music, art, writing, anything) before the campaign starts. Backers can check that it's there, then chip in. When the goal is reached, a single transaction pays the recipient **and** publishes the key that opens every locked file. Nobody can take the money without unlocking the work, and nobody can unlock the work early without the money being paid.
 
@@ -50,7 +56,7 @@ vault-open open --secret <key from the vault page> artwork.png.meta.json
 | --- | --- |
 | `contracts/` | The vault and factory smart contracts (Solidity), with tests and a deploy script |
 | `vault-seal/` | The command-line tools: `vault-seal` for creators and coordinators, `vault-open` for backers |
-| `web/` | The vault page backers use to contribute and withdraw |
+| `web/` | The vault page backers use to contribute and withdraw, published to GitHub Pages |
 | `scripts/` | An end-to-end run of the whole flow on a local chain, and CI helpers |
 | `docs/` | The guides, plus the technical details |
 

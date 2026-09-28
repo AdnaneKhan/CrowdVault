@@ -17,7 +17,7 @@ If the goal is never reached, backers withdraw their money. Nothing is lost.
 ## How it works
 
 1. **The coordinator sets up the campaign.** They create a campaign key and put the vault contract on-chain with a goal and a recipient.
-2. **Creators lock their files** to the campaign key. Each file becomes an encrypted copy they can share anywhere.
+2. **Creators lock their files** to the campaign key. Each file becomes a single `.sealed` file they can share anywhere.
 3. **Backers check the files and contribute.** A quick check confirms each file really will open when the vault unlocks, before anyone pays.
 4. **The goal is reached, and the coordinator claims.** The money goes to the recipient, and the key becomes public in the same transaction.
 5. **Everyone opens the files** with the now-public key.
@@ -41,13 +41,13 @@ cargo install --path vault-seal --bin vault-open    # from the root of this repo
 Before contributing, check a file against the key shown on the vault page:
 
 ```bash
-vault-open verify --campaign-key <key from the vault page> artwork.png.meta.json
+vault-open verify --campaign-key <key from the vault page> artwork.png.sealed
 ```
 
 After the unlock, open it:
 
 ```bash
-vault-open open --secret <key from the vault page> artwork.png.meta.json
+vault-open open --secret <key from the vault page> artwork.png.sealed
 ```
 
 ## What's in this repo

@@ -67,12 +67,12 @@ An earlier version of this list proposed halving the circuit by replacing the Po
 
 Sealing writes into a fresh directory. On ext4, sealing over an existing output file takes about 90 ms longer, because ext4 starts writeback early when a file is renamed over another.
 
-The format is `crowdvault-seal/2` (magic `CVENC2`). Files in the earlier format are refused, not opened.
+These measurements are from the `crowdvault-seal/2` format. The current format, `crowdvault-seal/3` (magic `CVSEAL3`), puts the metadata in a footer of the sealed file instead of a separate `.meta.json`, and no longer hashes the ciphertext, which saves the "hash the ciphertext" step below when sealing. `verify` now reads only the footer, so it takes about the same time at any size. Files in earlier formats are refused, not opened.
 
-How the new format works:
+How the format works:
 
 - **AES-256-GCM from ring** encrypts each chunk (7.6 GB/s on this core, against 1.8 GB/s for ChaCha20-Poly1305). It keeps the same STREAM chunking and nonces, and a test checks every chunk against RustCrypto's reference STREAM encryptor.
-- **BLAKE3** hashes the plaintext and the ciphertext (5.75 GB/s on one thread here, against 1.38 GB/s for SHA-256). Unlike SHA-256, it splits across cores. It also derives the file key, in key-derivation mode. The hashes match the official BLAKE3 implementation, so `b3sum` checks them.
+- **BLAKE3** hashes the plaintext (5.75 GB/s on one thread here, against 1.38 GB/s for SHA-256). Unlike SHA-256, it splits across cores. It also derives the file key, in key-derivation mode. The hashes match the official BLAKE3 implementation, so `b3sum` checks them.
 - **Batches of 64 chunks (4 MiB).** Each batch is hashed, encrypted and hashed again across all cores when there are several. Reading runs ahead and writing runs behind on their own threads, overlapping the work. With one core, everything runs inline.
 
 With the hashing and encryption this fast, what remains on one core is mostly memory traffic:

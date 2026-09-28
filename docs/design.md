@@ -6,19 +6,27 @@ The technical side of CrowdVault: how files are sealed, what backers can check a
 
 For each file the tool picks a random scalar r and publishes `R = r·G` as the sealed key. The file key is derived from `r·X` (plus the file's name and format). After the reveal, anyone derives the same key from `x·R`, because `x·R = r·X`.
 
-The file key is derived with BLAKE3 in key-derivation mode, and the file is encrypted under it in 64 KiB chunks, using the STREAM construction over AES-256-GCM. Files of any size stream through without being held in memory, and truncated, reordered or altered chunks are all detected. The last chunk also authenticates the file's length and BLAKE3 hash, so every metadata field is bound in: edit any of them and the file won't open.
+The file key is derived with BLAKE3 in key-derivation mode, and the file is encrypted under it in 64 KiB chunks, using the STREAM construction over AES-256-GCM. Files of any size stream through without being held in memory, and truncated, reordered or altered chunks are all detected. The last chunk also authenticates the metadata footer exactly as written, including the file's length and BLAKE3 hash, so no byte of the metadata can change without the file failing to open.
 
 The ephemeral secrets of a seal are wiped from memory as soon as they are used: the random scalar r, the shared secret r·X, the file key and the AES key schedule. A test searches the whole process memory after sealing, opening and proving, and finds none of them.
 
+Each work is one `.sealed` file:
+
+```text
+magic ‖ encrypted chunks ‖ footer (JSON metadata) ‖ footer length ‖ "CVFOOTER"
+```
+
+The metadata goes at the end so sealing stays a single pass: the file's length and hash are only known once all of it has been read. Tools find it by reading the last 12 bytes. The format is `crowdvault-seal/3`; files from the earlier two-file format (a `.enc` beside a `.meta.json`) are refused with a message saying so.
+
 ## What backers can verify
 
-**Before the reveal, with certainty and no trust.** `vault-open verify` checks that the metadata names the vault's campaign key and that the sealed key is a valid curve point in its one canonical encoding. The file key is then a fixed function of `x` and public data. The contract only accepts an `x` with `x·G = X`. So the key the vault reveals is guaranteed to produce exactly this file's key. There is no wrapped key blob that could turn out not to open. `verify` also checks that the encrypted file matches its metadata byte for byte.
+**Before the reveal, with certainty and no trust.** `vault-open verify` checks that the metadata names the vault's campaign key and that the sealed key is a valid curve point in its one canonical encoding. The file key is then a fixed function of `x` and public data. The contract only accepts an `x` with `x·G = X`. So the key the vault reveals is guaranteed to produce exactly this file's key. There is no wrapped key blob that could turn out not to open. It reads only the metadata footer at the end of the sealed file, so it's instant at any size. It can't check the encrypted chunks without the key; opening checks every byte, and the last chunk authenticates the footer exactly as written, so a change to either stops the file from opening.
 
 **Trusted, unless the file is proven.** Whether the creator encrypted the promised content under that key. After the reveal, `open` checks the content against the creator's committed hash, and a mismatch is reported as the creator's fault. Anyone with the revealed key can reproduce it, so cheating is publicly provable, just not preventable.
 
 ### Proven files (optional, small files)
 
-`vault-seal seal --prove` adds a zero-knowledge proof of about 1.5 KB. `verify` checks it automatically, and it shows, with no secret and no trust, that the key the vault reveals will open the file to a plaintext with the fingerprint in its metadata. If that fingerprint was published for a known work, the plaintext is exactly that work; without a published fingerprint, the proof guarantees the file opens and can't be swapped. `verify` refuses proven files over 64 KB by default, so a hostile file can't make checking run for hours. Nothing on-chain changes. Proven files use their own format, `crowdvault-seal/zk1`, alongside the ordinary one.
+`vault-seal seal --prove` adds a zero-knowledge proof of about 1.5 KB. `verify` checks it automatically, and it shows, with no secret and no trust, that the key the vault reveals will open the file to a plaintext with the fingerprint in its metadata. If that fingerprint was published for a known work, the plaintext is exactly that work; without a published fingerprint, the proof guarantees the file opens and can't be swapped. `verify` refuses proven files over 64 KB by default, so a hostile file can't make checking run for hours. Nothing on-chain changes. Proven files use their own format, `crowdvault-seal/zk2`, alongside the ordinary one, and carry the proof inside the same `.sealed` file.
 
 The design keeps the proof small and the statement cheap:
 

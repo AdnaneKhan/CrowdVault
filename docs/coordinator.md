@@ -173,7 +173,7 @@ Send each creator:
 
 Creators should take the campaign key from the vault page or the chain, not from a chat message. That protects everyone from a key swapped in transit.
 
-Collect both files from each creator (`.enc` and `.meta.json`), plus the `.proof` for anything sealed with `--prove`, and publish a list of what's sealed, with links, so backers can check it before they contribute.
+Collect each creator's `.sealed` files (one per work; a proven file carries its proof inside), and publish a list of what's sealed, with links, so backers can check it before they contribute.
 
 Proofs are optional and suit small files (up to 64 KB by default). A proof lets backers confirm, before paying, that a file opens to exactly the work with a given fingerprint. That's strongest when someone backers trust has seen the work privately, run `vault-seal fingerprint` on it, and published the fingerprint. Consider asking creators of small pieces to seal with a proof, and mark proven files in your list.
 

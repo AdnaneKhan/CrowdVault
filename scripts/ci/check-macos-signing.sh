@@ -11,9 +11,9 @@ trap 'rm -rf "$work"' EXIT
 "$bin/vault-seal" keygen --out "$work/k.secret" > /dev/null
 
 # Each tool's first command that handles a secret. vault-open warns before
-# it reads the (missing) metadata file, so its failure here is expected.
+# it reads the (missing) sealed file, so its failure here is expected.
 seal_secret() { "$bin/vault-seal" pubkey --secret-file "$work/k.secret" > /dev/null; }
-open_secret() { "$bin/vault-open" open --secret-file "$work/k.secret" "$work/none.meta.json" > /dev/null || true; }
+open_secret() { "$bin/vault-open" open --secret-file "$work/k.secret" "$work/none.sealed" > /dev/null || true; }
 
 check() {
   local name=$1 run=$2 vs=$bin/$1

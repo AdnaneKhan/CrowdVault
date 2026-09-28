@@ -3,12 +3,12 @@
 //! with `vault-seal`.
 
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use vault_seal::{open, verify, zk, CampaignKey, CampaignSecret};
+use vault_seal::{open, read_metadata, verify, zk, CampaignKey, CampaignSecret, SealedMeta};
 
 mod common;
 use common::*;
@@ -27,20 +27,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Check, with no secret, that the key this campaign reveals will open the
-    /// file, and that the encrypted file matches its metadata.
+    /// file. For a proven file, also check its proof.
     Verify {
         /// Campaign public key, taken from the vault itself (the vault page, or
-        /// keyX/keyY on-chain), never from the metadata file
+        /// keyX/keyY on-chain), never from the sealed file
         #[arg(long)]
         campaign_key: String,
-        /// The .meta.json file
-        meta: PathBuf,
-        /// The .enc file (default: next to the metadata)
-        #[arg(long)]
-        encrypted: Option<PathBuf>,
-        /// The .proof file of a proven file (default: next to the metadata)
-        #[arg(long)]
-        proof: Option<PathBuf>,
+        /// The .sealed file
+        file: PathBuf,
         /// Largest proven file to check, in KiB. Protects against hostile
         /// files built to make verification run for hours.
         #[arg(long, default_value_t = 64)]
@@ -55,11 +49,8 @@ enum Cmd {
         /// File holding the secret as hex (e.g. the coordinator's campaign.secret)
         #[arg(long)]
         secret_file: Option<PathBuf>,
-        /// The .meta.json file
-        meta: PathBuf,
-        /// The .enc file (default: next to the metadata)
-        #[arg(long)]
-        encrypted: Option<PathBuf>,
+        /// The .sealed file
+        file: PathBuf,
         /// Directory for the opened file
         #[arg(long, default_value = ".")]
         out_dir: PathBuf,
@@ -76,24 +67,19 @@ fn main() -> Result<()> {
         warn_if_not_hardened();
     }
     match cmd {
-        Cmd::Verify { campaign_key, meta, encrypted, proof, max_kib } => {
+        Cmd::Verify { campaign_key, file, max_kib } => {
             let pk = CampaignKey::from_hex(&campaign_key).context("parsing --campaign-key")?;
-            let enc = encrypted.unwrap_or_else(|| sibling(&meta, ".enc"));
-            match read_meta(&meta)? {
-                AnyMeta::Stream(m) => {
-                    let f = BufReader::new(File::open(&enc).with_context(|| format!("reading {}", enc.display()))?);
-                    verify(&m, &pk, Some(f))?;
+            let mut f = open_sealed(&file)?;
+            match read_metadata(&mut f)? {
+                SealedMeta::Stream(_) => {
+                    let m = verify(&mut f, &pk)?;
                     out!("OK: {}", m.file_name);
                     out!("  The key this vault reveals will open it: the sealed key is valid and bound to this campaign.");
-                    out!("  {} matches the metadata byte for byte.", enc.display());
                     out!("  Content is the creator's claim until opened: {} bytes, blake3 {}", m.plaintext_len, m.plaintext_blake3);
+                    out!("  Any change to the file, its metadata included, stops it from opening.");
                 }
-                AnyMeta::Zk(m) => {
-                    let proof_path = proof.unwrap_or_else(|| sibling(&meta, ".proof"));
-                    let enc_bytes = fs::read(&enc).with_context(|| format!("reading {}", enc.display()))?;
-                    let proof_bytes =
-                        fs::read(&proof_path).with_context(|| format!("reading the proof {}", proof_path.display()))?;
-                    zk::verify(&m, &pk, &enc_bytes, &proof_bytes, kib(max_kib)?)?;
+                SealedMeta::Proven(_) => {
+                    let m = zk::verify(&mut f, &pk, kib(max_kib)?)?;
                     out!("PROVEN: {}", m.file_name);
                     out!("  The key this vault reveals will open it to a {}-byte file with fingerprint", m.plaintext_len);
                     out!("  {}", m.fingerprint);
@@ -102,17 +88,17 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Open { secret, secret_file, meta, encrypted, out_dir } => {
+        Cmd::Open { secret, secret_file, file, out_dir } => {
             let sk = match (secret, secret_file) {
                 (Some(s), _) => CampaignSecret::from_hex(&s)?,
                 (None, Some(f)) => read_secret_file(&f)?,
                 (None, None) => bail!("pass --secret or --secret-file"),
             };
-            let any = read_meta(&meta)?;
-            let enc = encrypted.unwrap_or_else(|| sibling(&meta, ".enc"));
+            let mut f = open_sealed(&file)?;
+            let meta = read_metadata(&mut f)?;
 
             // Never trust the metadata's file name as a path.
-            let name = Path::new(any.file_name())
+            let name = Path::new(meta.file_name())
                 .file_name()
                 .and_then(|n| n.to_str())
                 .filter(|n| !n.is_empty() && *n != "." && *n != "..")
@@ -121,25 +107,21 @@ fn main() -> Result<()> {
             fs::create_dir_all(&out_dir)?;
             let dest = out_dir.join(&name);
             let tmp = with_suffix(&dest, ".partial");
-            let result = match any {
-                AnyMeta::Stream(m) => {
-                    let reader = BufReader::new(File::open(&enc).with_context(|| format!("reading {}", enc.display()))?);
+            let result = match meta {
+                SealedMeta::Stream(_) => {
                     let mut w = BufWriter::new(File::create(&tmp)?);
-                    let r = open(&m, &sk, reader, &mut w);
+                    let r = open(f, &sk, &mut w).map(|_| ());
                     drop(w);
                     r
                 }
-                AnyMeta::Zk(m) => {
-                    let bytes = fs::read(&enc).with_context(|| format!("reading {}", enc.display()))?;
-                    zk::open(&m, &sk, &bytes).and_then(|pt| fs::write(&tmp, pt).map_err(Into::into))
-                }
+                SealedMeta::Proven(_) => zk::open(&mut f, &sk).and_then(|(_, pt)| fs::write(&tmp, pt).map_err(Into::into)),
             };
             if let Err(e) = result {
                 let _ = fs::remove_file(&tmp);
                 return Err(e.into());
             }
             fs::rename(&tmp, &dest)?;
-            out!("Opened {} -> {}", enc.display(), dest.display());
+            out!("Opened {} -> {}", file.display(), dest.display());
         }
         Cmd::Fingerprint { input } => fingerprint(&input)?,
     }

@@ -629,8 +629,8 @@ export function App() {
               <h2>Decryption key</h2>
               <DecodedKey value={keyHex(s.revealedKey)} />
               <Copy text={keyHex(s.revealedKey)} label="Copy key" className="btn btn-wax" />
-              <p>Open each sealed file with its metadata file:</p>
-              <pre>vault-open open --secret {keyHex(s.revealedKey)} yourfile.meta.json</pre>
+              <p>Open each sealed file with it:</p>
+              <pre>vault-open open --secret {keyHex(s.revealedKey)} yourfile.sealed</pre>
             </section>
           )}
 
@@ -643,8 +643,8 @@ export function App() {
             </div>
             <pre>vault-seal seal --campaign-key {s.campaignKey} yourfile</pre>
             <p>
-              This makes two files. Share <code>yourfile.enc</code> anywhere; it's the encrypted file. Share{" "}
-              <code>yourfile.meta.json</code> with it; it holds the sealed key that opens it.
+              This makes one file, <code>yourfile.sealed</code>: your work, encrypted, with the sealed key that opens it
+              inside. Share it anywhere.
             </p>
           </details>
           {!DEMO && <Connection key={net.key} conn={conn} onRpc={chooseRpc} />}

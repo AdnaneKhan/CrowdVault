@@ -54,21 +54,21 @@ case $mode in
     for dir in "$@"; do
       out="$work/opened/$(basename "$dir")"
       for f in $PLAIN $PROVEN; do
-        meta="$dir/$f.meta.json"
-        [ -f "$meta" ] || { echo "FAIL: $meta is missing" >&2; exit 1; }
+        sealed="$dir/$f.sealed"
+        [ -f "$sealed" ] || { echo "FAIL: $sealed is missing" >&2; exit 1; }
         want=OK
         [ "$f" = "$PROVEN" ] && want=PROVEN
-        if ! report=$("$vo" verify --campaign-key "$key" "$meta"); then
-          echo "FAIL: $meta does not verify (the error is above)" >&2
+        if ! report=$("$vo" verify --campaign-key "$key" "$sealed"); then
+          echo "FAIL: $sealed does not verify (the error is above)" >&2
           exit 1
         fi
         verdict=$(printf '%s\n' "$report" | tr -d '\r' | sed -n 1p)
         case $verdict in
           "$want":*) ;;
-          *) echo "FAIL: verify $meta: expected $want, got: $verdict" >&2; exit 1 ;;
+          *) echo "FAIL: verify $sealed: expected $want, got: $verdict" >&2; exit 1 ;;
         esac
-        "$vo" open --secret-file "$work/test.secret" "$meta" --out-dir "$out" > /dev/null ||
-          { echo "FAIL: $meta does not open (the error is above)" >&2; exit 1; }
+        "$vo" open --secret-file "$work/test.secret" "$sealed" --out-dir "$out" > /dev/null ||
+          { echo "FAIL: $sealed does not open (the error is above)" >&2; exit 1; }
         cmp -s "$dir/originals/$f" "$out/$f" || { echo "FAIL: $dir/$f does not open to the original" >&2; exit 1; }
         echo "ok  $dir/$f ($want)"
       done

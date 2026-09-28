@@ -479,7 +479,7 @@ export function App() {
               <DecodedKey value={keyHex(s.revealedKey)} />
               <Copy text={keyHex(s.revealedKey)} label="Copy key" className="btn btn-wax" />
               <p>Open each sealed file with its metadata file:</p>
-              <pre>vault-seal open --secret {keyHex(s.revealedKey)} yourfile.meta.json</pre>
+              <pre>vault-open open --secret {keyHex(s.revealedKey)} yourfile.meta.json</pre>
             </section>
           )}
 

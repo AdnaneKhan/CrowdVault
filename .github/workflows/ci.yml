@@ -54,9 +54,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, platform: linux, exe: vault-seal }
-          - { os: macos-latest, platform: macos, exe: vault-seal }
-          - { os: windows-latest, platform: windows, exe: vault-seal.exe }
+          - { os: ubuntu-latest, platform: linux, exe: "" }
+          - { os: macos-latest, platform: macos, exe: "" }
+          - { os: windows-latest, platform: windows, exe: .exe }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -72,11 +72,11 @@ jobs:
         run: cargo build --release
       - name: Hardened-runtime reminder, then signing
         if: runner.os == 'macOS'
-        run: bash scripts/ci/check-macos-signing.sh vault-seal/target/release/vault-seal
+        run: bash scripts/ci/check-macos-signing.sh vault-seal/target/release
       - name: Seal sample files
-        run: bash scripts/ci/round-trip.sh seal vault-seal/target/release/${{ matrix.exe }} sealed-${{ matrix.platform }}
+        run: bash scripts/ci/round-trip.sh seal vault-seal/target/release sealed-${{ matrix.platform }}
       - name: Open them again here
-        run: bash scripts/ci/round-trip.sh open vault-seal/target/release/${{ matrix.exe }} sealed-${{ matrix.platform }}
+        run: bash scripts/ci/round-trip.sh open vault-seal/target/release sealed-${{ matrix.platform }}
       - uses: actions/upload-artifact@v7
         with:
           name: sealed-${{ matrix.platform }}
@@ -85,7 +85,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: vault-seal-${{ matrix.platform }}
-          path: vault-seal/target/release/${{ matrix.exe }}
+          path: |
+            vault-seal/target/release/vault-seal${{ matrix.exe }}
+            vault-seal/target/release/vault-open${{ matrix.exe }}
           if-no-files-found: error
 
   cross-platform:
@@ -95,9 +97,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, platform: linux, exe: vault-seal }
-          - { os: macos-latest, platform: macos, exe: vault-seal }
-          - { os: windows-latest, platform: windows, exe: vault-seal.exe }
+          - { os: ubuntu-latest, platform: linux, exe: "" }
+          - { os: macos-latest, platform: macos, exe: "" }
+          - { os: windows-latest, platform: windows, exe: .exe }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -111,7 +113,7 @@ jobs:
           path: sealed
       - name: Verify and open what the other two platforms sealed
         run: |
-          chmod +x "bin/${{ matrix.exe }}"
+          chmod +x "bin/vault-seal${{ matrix.exe }}" "bin/vault-open${{ matrix.exe }}"
           others=()
           for dir in sealed/sealed-*; do
             [ "$dir" = "sealed/sealed-${{ matrix.platform }}" ] || others+=("$dir")
@@ -120,7 +122,7 @@ jobs:
             echo "::error::expected files sealed on 2 other platforms, found ${#others[@]}"
             exit 1
           fi
-          bash scripts/ci/round-trip.sh open "bin/${{ matrix.exe }}" "${others[@]}"
+          bash scripts/ci/round-trip.sh open bin "${others[@]}"
 
   end-to-end:
     name: End to end on a local chain

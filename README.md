@@ -4,7 +4,9 @@ A crowdfunding vault where releasing the money and publishing the decryption key
 
 ```
 contracts/   Solidity vault and factory + Foundry tests + deploy script
-vault-seal/  Rust CLI and library: keygen, seal, verify, open, fingerprint
+vault-seal/  Rust library and two CLIs:
+               vault-seal (creators, coordinator): keygen, pubkey, seal, fingerprint
+               vault-open (backers): verify, open, fingerprint
   src/zk/    optional zero-knowledge proofs for small files
 web/         TypeScript (React + viem) contribute / withdraw UI
 scripts/     e2e.sh: full local run across all pieces
@@ -15,7 +17,7 @@ scripts/     e2e.sh: full local run across all pieces
 - **[Coordinator guide](docs/coordinator.md):** creating the campaign key, deploying the vault, hosting the page, briefing creators, and releasing the key.
 - **[Creator guide](docs/creators.md):** getting the campaign key, sealing files, checking them, sharing them, and opening them after the unlock.
 
-Backers need only two commands. Before contributing, check any sealed file against the vault's key: `vault-seal verify --campaign-key <key from the vault page> file.meta.json`. After the unlock, open it: `vault-seal open --secret <key from the vault page> file.meta.json`.
+Backers need only `vault-open` (`cargo install --path vault-seal --bin vault-open`) and two commands. Before contributing, check any sealed file against the vault's key: `vault-open verify --campaign-key <key from the vault page> file.meta.json`. After the unlock, open it: `vault-open open --secret <key from the vault page> file.meta.json`.
 
 ## Quick start
 
@@ -30,9 +32,9 @@ cd web && npm install && npm run dev    # then open /?vault=0x...
 
 1. The coordinator runs `vault-seal keygen` and deploys the vault through the factory with the printed `KEY_X` and `KEY_Y`.
 2. Creators read the campaign key from the vault and run `vault-seal seal`. Each file becomes `name.enc` plus `name.meta.json`.
-3. Backers check files with `vault-seal verify` and contribute on the vault page.
+3. Backers check files with `vault-open verify` and contribute on the vault page.
 4. When the goal is reached, the coordinator calls `claim` with the secret. The money goes to the recipient, and the key is public.
-5. Everyone runs `vault-seal open` with the key from the vault page.
+5. Everyone runs `vault-open open` with the key from the vault page.
 
 The guides above cover each step in full.
 
@@ -46,7 +48,7 @@ The ephemeral secrets of a seal are wiped from memory as soon as they are used: 
 
 ## What backers can verify
 
-**Before the reveal, with certainty and no trust.** `vault-seal verify` checks that the metadata names the vault's campaign key and that the sealed key is a valid curve point in its one canonical encoding. The file key is then a fixed function of `x` and public data. The contract only accepts an `x` with `x·G = X`. So the key the vault reveals is guaranteed to produce exactly this file's key. There is no wrapped key blob that could turn out not to open. `verify` also checks that the encrypted file matches its metadata byte for byte.
+**Before the reveal, with certainty and no trust.** `vault-open verify` checks that the metadata names the vault's campaign key and that the sealed key is a valid curve point in its one canonical encoding. The file key is then a fixed function of `x` and public data. The contract only accepts an `x` with `x·G = X`. So the key the vault reveals is guaranteed to produce exactly this file's key. There is no wrapped key blob that could turn out not to open. `verify` also checks that the encrypted file matches its metadata byte for byte.
 
 **Trusted, unless the file is proven.** Whether the creator encrypted the promised content under that key. After the reveal, `open` checks the content against the creator's committed hash, and a mismatch is reported as the creator's fault. Anyone with the revealed key can reproduce it, so cheating is publicly provable, just not preventable.
 
@@ -115,7 +117,7 @@ Other behaviours to be aware of:
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request:
 
 - **Contracts:** `forge build --sizes`, which fails if a contract exceeds the deployment size limit; the Foundry tests; and a check that the web app's copy of the ABI still matches the compiled contracts. After changing a contract, run `forge build` in `contracts/`, then `python3 scripts/gen-abi.py`.
-- **vault-seal on Linux, macOS (Apple silicon) and Windows:** the full test suite, then sealing sample files (empty, one byte, exactly one chunk, 5 MB, and a proven file) and opening them again. On macOS it also checks that an unsigned build reminds you to sign it and that signing silences the reminder; every later step there runs on the signed build.
+- **vault-seal and vault-open on Linux, macOS (Apple silicon) and Windows:** the full test suite, then sealing sample files (empty, one byte, exactly one chunk, 5 MB, and a proven file) and opening them again. On macOS it also checks, for each tool, that an unsigned build reminds you to sign it and that signing silences the reminder; every later step there runs on the signed build.
 - **Cross-platform:** each platform verifies and opens the files the other two sealed, byte for byte.
 - **End to end:** `scripts/e2e.sh` on a local anvil chain: deploy through the factory, contribute, claim (which reveals the key), then open every file. Every step is checked, and any mismatch fails the run.
 - **Web app:** a clean install from the lockfile, the type-checked build, and the single-file demo.

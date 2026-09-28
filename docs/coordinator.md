@@ -7,7 +7,7 @@ Every command here is exercised by `scripts/e2e.sh` on a local chain.
 ## What you need
 
 - A computer you trust to hold the campaign secret, ideally one you can keep offline between steps.
-- Rust, to build `vault-seal`. Foundry (`forge` and `cast`), to deploy and talk to the vault. Node.js 18 or later, only if you host the vault page yourself.
+- Rust, to build `vault-seal` (and `vault-open`, which backers and creators use to check and open files). Foundry (`forge` and `cast`), to deploy and talk to the vault. Node.js 18 or later, only if you host the vault page yourself.
 - An RPC URL for your chain, from a provider or your own node.
 - A deployer account with a little ETH for gas.
 - A recipient address, where the money goes. It can be a multisig.
@@ -20,20 +20,21 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh     # Rust
 curl -L https://foundry.paradigm.xyz | bash && foundryup            # Foundry
 ```
 
-Building `vault-seal` needs a C toolchain, which Rust's installer already asks for: Xcode command-line tools on macOS, build-essential on Linux, Visual Studio Build Tools on Windows.
+Building the tools needs a C toolchain, which Rust's installer already asks for: Xcode command-line tools on macOS, build-essential on Linux, Visual Studio Build Tools on Windows.
 
 From the root of this repo:
 
 ```bash
-cargo install --path vault-seal      # puts vault-seal on your PATH
+cargo install --path vault-seal      # puts vault-seal and vault-open on your PATH
 vault-seal --help
 cd contracts && forge test           # optional: 25 tests should pass
 ```
 
-On macOS, also sign the tool with the hardened runtime, so no other program can read its memory while it holds keys. Rebuilding removes the signature, so repeat this after each build; `vault-seal` reminds you if a build isn't signed.
+On macOS, also sign both tools with the hardened runtime, so no other program can read its memory while it holds keys. Rebuilding removes the signature, so repeat this after each build; each tool reminds you if its build isn't signed.
 
 ```bash
 codesign --force --options runtime --sign - "$(which vault-seal)"
+codesign --force --options runtime --sign - "$(which vault-open)"
 ```
 
 Put your deployer key in Foundry's encrypted keystore, so it never appears in your shell history:

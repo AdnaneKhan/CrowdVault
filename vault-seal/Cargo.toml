@@ -2,16 +2,22 @@
 name = "vault-seal"
 version = "0.1.0"
 edition = "2021"
-description = "Seal files to a CrowdVault campaign key and open them once the key is revealed on-chain."
+description = "Seal files to a CrowdVault campaign key (vault-seal) and check and open them once the key is revealed on-chain (vault-open)."
 license = "MIT"
 
 [lib]
 name = "vault_seal"
 path = "src/lib.rs"
 
+# Creators and the coordinator: keygen, pubkey, seal, fingerprint.
 [[bin]]
 name = "vault-seal"
-path = "src/main.rs"
+path = "src/bin/vault-seal.rs"
+
+# Backers: verify, open, fingerprint.
+[[bin]]
+name = "vault-open"
+path = "src/bin/vault-open.rs"
 
 [dependencies]
 k256 = { version = "0.13", features = ["arithmetic", "expose-field"] }

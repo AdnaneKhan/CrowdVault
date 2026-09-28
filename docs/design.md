@@ -46,19 +46,19 @@ For large files, two further routes were explored: spot checks (cheap, but sampl
 
 One trade-off of deriving the key from the campaign key: an encrypted file belongs to one campaign. Offering the same work in another campaign means sealing it again.
 
-## Changes from the design notes
+## Releasing the key
 
-The design called for a Schnorr adaptor signature, with the secret extracted from the completed signature. On the EVM that isn't needed: the contract checks `x·G == X` directly using the `ecrecover` precompile trick (one call, about 3k gas), then pays out. Claim and reveal are still one transaction, and front-running is harmless because the destination is fixed. This removes the nonce-handling risk (security spot #1) entirely: with no signature, there's no nonce to get wrong.
+The claim reveals the secret directly: the contract checks `x·G == X` using the `ecrecover` precompile trick (one call, about 3k gas), then pays out. Claim and reveal are one transaction, and front-running is harmless because the destination is fixed. An adaptor signature, with the secret extracted from a completed signature, would tie the two together as well, but on the EVM it adds nothing, and it would bring a nonce that must never be reused. The direct check has no nonce to get wrong.
 
-The design also called for a sigma protocol to prove the encryption was correct before funding. That's superseded by the MVP trust model above.
+For ordinary files, whether the content is what the creator promised is taken on trust until the reveal, as described above; proven files remove that trust for small files.
 
 ## Security notes
 
-How the five critical spots from the design notes are handled:
+The five places where a mistake would be most costly, and how each is handled:
 
 1. **Nonce handling.** Removed by using the direct key check. In the Rust tool, every seal uses a fresh r and so a fresh file key, so the fixed AEAD nonce prefix is never reused under one key.
 2. **Reentrancy.** Every state change happens before the ETH transfer, plus a reentrancy guard. Tested with an attacker contract.
-3. **Atomic threshold check.** The contribution that reaches the goal sets `lockedAtBlock` in the same transaction. Tested.
+3. **Atomic threshold check.** The contribution that reaches the goal sets `lockedAt` in the same transaction. Tested.
 4. **Key integrity.** `X` is fixed at deployment and checked to be on the curve, so nobody can substitute a different point. The `ecrecover` key check is fuzz-tested against Foundry's own secp256k1 keys.
 5. **Accounting.** Solidity 0.8 checked arithmetic; fuzz-tested that the total always equals the contract balance and the sum of contributions.
 

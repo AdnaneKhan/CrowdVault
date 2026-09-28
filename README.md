@@ -64,3 +64,7 @@ cd web && npm install && npm run dev    # the vault page, then open /?vault=0x..
 ```
 
 How sealing works, what backers can verify and why, the zero-knowledge proofs, and the security notes are in **[Design and security](docs/design.md)**. Speed measurements are in [Performance](docs/performance.md). Agents and contributors should read [AGENTS.md](AGENTS.md).
+
+## License
+
+[MIT](LICENSE)

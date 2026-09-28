@@ -26,7 +26,7 @@
 //! exactly this file key. There is no wrapped blob that could turn out not to
 //! open.
 //!
-//! What is trusted (MVP): that the creator encrypted the promised content
+//! What is trusted: that the creator encrypted the promised content
 //! under that key. After the reveal, [`open`] detects any mismatch against the
 //! creator's committed hash, and anyone can reproduce it.
 //!

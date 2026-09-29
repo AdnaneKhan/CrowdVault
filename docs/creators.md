@@ -18,7 +18,9 @@ cargo install --path vault-seal      # run from the root of this repo; installs 
 vault-seal --help
 ```
 
-On macOS, also sign both tools with the hardened runtime, so no other program can read its memory while it holds keys. Rebuilding removes the signature, so repeat this after each build; each tool reminds you if its build isn't signed.
+Or skip building: download both tools ready to run, as described under [Prebuilt binaries](../README.md#prebuilt-binaries). The macOS downloads are already signed, so the next step isn't needed for them.
+
+If you built the tools yourself on macOS, also sign both with the hardened runtime, so no other program can read their memory while they hold keys. Rebuilding removes the signature, so repeat this after each build; each tool reminds you if its build isn't signed.
 
 ```bash
 codesign --force --options runtime --sign - "$(which vault-seal)"

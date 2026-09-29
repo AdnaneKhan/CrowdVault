@@ -1,0 +1,128 @@
+name: Build binaries
+
+# Builds vault-seal and vault-open for Linux, macOS and Windows on every push
+# to main, checks each build with a seal-and-open round trip, and uploads one
+# archive per platform (both tools, the license, and a SHA-256 checksum) as
+# workflow artifacts.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_LIB_BACKTRACE: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on the oldest supported Ubuntu, so the binaries need only
+          # glibc 2.35 and run on most distributions from 2022 on.
+          - { label: linux-x86_64, os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, exe: "" }
+          - { label: linux-arm64, os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, exe: "" }
+          # One universal binary per tool, for Apple silicon and Intel Macs.
+          - { label: macos-universal, os: macos-latest, target: aarch64-apple-darwin, exe: "" }
+          # The C runtime is linked in, so no Visual C++ redistributable is needed.
+          - { label: windows-x86_64, os: windows-latest, target: x86_64-pc-windows-msvc, exe: .exe, rustflags: -C target-feature=+crt-static }
+          - { label: windows-arm64, os: windows-11-arm, target: aarch64-pc-windows-msvc, exe: .exe, rustflags: -C target-feature=+crt-static }
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.label == 'macos-universal' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vault-seal
+          key: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: vault-seal
+        env:
+          TARGET: ${{ matrix.target }}
+          LABEL: ${{ matrix.label }}
+        run: |
+          cargo build --release --locked --target "$TARGET"
+          if [ "$LABEL" = macos-universal ]; then
+            cargo build --release --locked --target x86_64-apple-darwin
+          fi
+
+      - name: Collect the binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          LABEL: ${{ matrix.label }}
+          EXE: ${{ matrix.exe }}
+        run: |
+          mkdir -p dist/bin
+          for tool in vault-seal vault-open; do
+            if [ "$LABEL" = macos-universal ]; then
+              lipo -create -output "dist/bin/$tool" \
+                "vault-seal/target/aarch64-apple-darwin/release/$tool" \
+                "vault-seal/target/x86_64-apple-darwin/release/$tool"
+              lipo -archs "dist/bin/$tool"
+              # Ad hoc, with the hardened runtime, so no other program can
+              # read the tool's memory (the tools warn when it's missing).
+              codesign --force --options runtime --sign - "dist/bin/$tool"
+            else
+              cp "vault-seal/target/$TARGET/release/$tool$EXE" dist/bin/
+            fi
+          done
+
+      - name: Seal and open sample files with these binaries
+        run: |
+          bash scripts/ci/round-trip.sh seal dist/bin sealed
+          bash scripts/ci/round-trip.sh open dist/bin sealed
+          dist/bin/vault-seal${{ matrix.exe }} --version
+          dist/bin/vault-open${{ matrix.exe }} --version
+
+      - name: Package
+        id: package
+        env:
+          LABEL: ${{ matrix.label }}
+          EXE: ${{ matrix.exe }}
+        run: |
+          name="crowdvault-tools-$LABEL"
+          mkdir "dist/$name"
+          cp dist/bin/vault-seal$EXE dist/bin/vault-open$EXE LICENSE "dist/$name/"
+          cd dist
+          if [ -n "$EXE" ]; then
+            archive="$name.zip"
+            7z a -bso0 "$archive" "$name"
+          else
+            archive="$name.tar.gz"
+            tar -czf "$archive" "$name"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+          cat "$archive.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: |
+            dist/${{ steps.package.outputs.archive }}
+            dist/${{ steps.package.outputs.archive }}.sha256
+          if-no-files-found: error

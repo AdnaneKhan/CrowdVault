@@ -20,6 +20,15 @@
 //! Assumptions: discrete log in secq256k1 (proof soundness), CDH in secp256k1
 //! and Poseidon as a PRF and hash (confidentiality and binding), and SHA-256
 //! as a random oracle for Fiat–Shamir.
+//!
+//! A proven file is one file, in the [`crate::container`] layout:
+//!
+//! ```text
+//!   FILE_MAGIC ‖ ciphertext elements (32 bytes each) ‖ proof ‖ footer ‖ footer length ‖ FOOTER_MAGIC
+//! ```
+//!
+//! Every footer field that matters is in the proof's transcript, so an edited
+//! footer fails verification.
 
 pub mod bp;
 pub mod circuit;
@@ -28,27 +37,30 @@ pub mod field;
 pub mod poseidon;
 pub mod secq;
 
+use std::io::{Read, Seek};
+
 use k256::{AffinePoint, ProjectivePoint};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use zeroize::Zeroizing;
 
-use crate::{compressed, nonzero_scalar, parse_canonical, CampaignKey, CampaignSecret, Error, Result};
+use crate::{compressed, container, nonzero_scalar, parse_canonical, read_full, CampaignKey, CampaignSecret, Error, Result};
 use bp::{Gens, Proof, Transcript};
 use circuit::{coords, fingerprint_native, kdf_native, keystream_native, Statement};
 use cs::Cs;
 use field::Fp;
 
-pub const FORMAT: &str = "crowdvault-seal/zk1";
-pub const FILE_MAGIC: &[u8; 8] = b"CVZK1\0\0\0";
+pub const FORMAT: &str = "crowdvault-seal/zk2";
+pub const FILE_MAGIC: &[u8; 8] = b"CVZK2\0\0\0";
 pub const PROOF_MAGIC: &[u8; 8] = b"CVPF1\0\0\0";
 /// Bytes per field element of plaintext.
 pub const CHUNK: usize = 31;
 pub const DEFAULT_MAX_BYTES: u64 = 64 * 1024;
 
-/// The `.meta.json` of a proven file.
+/// The footer of a proven file.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ZkMetadata {
     pub format: String,
     /// X, compressed hex
@@ -60,8 +72,8 @@ pub struct ZkMetadata {
     /// Proven. Anyone holding the original recomputes it with
     /// `vault-seal fingerprint` or `vault-open fingerprint`.
     pub fingerprint: String,
-    pub ciphertext_len: u64,
-    pub ciphertext_sha256: String,
+    /// Bytes of proof between the ciphertext and the footer.
+    pub proof_len: u64,
 }
 
 impl ZkMetadata {
@@ -69,8 +81,8 @@ impl ZkMetadata {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    pub fn from_json(s: &str) -> Result<Self> {
-        let m: Self = serde_json::from_str(s)?;
+    pub fn from_json(s: &[u8]) -> Result<Self> {
+        let m: Self = serde_json::from_slice(s)?;
         if m.format != FORMAT {
             return Err(Error::Format);
         }
@@ -82,7 +94,8 @@ pub fn chunks_for(len: u64) -> u64 {
     len.div_ceil(CHUNK as u64)
 }
 
-/// Size of the `.enc` file (None on overflow).
+/// Size of the magic and ciphertext elements, the part the proof commits to
+/// (None on overflow).
 pub fn ciphertext_len_for(len: u64) -> Option<u64> {
     (FILE_MAGIC.len() as u64).checked_add(chunks_for(len).checked_mul(32)?)
 }
@@ -161,11 +174,8 @@ fn parse(meta: &ZkMetadata, enc: &[u8]) -> Result<Parsed> {
     }
     let x = parse_canonical(&meta.campaign_key)?;
     let r = parse_canonical(&meta.sealed_key)?;
-    if Some(meta.ciphertext_len) != ciphertext_len_for(meta.plaintext_len) {
+    if Some(enc.len() as u64) != ciphertext_len_for(meta.plaintext_len) {
         return Err(Error::Malformed("sizes are inconsistent"));
-    }
-    if enc.len() as u64 != meta.ciphertext_len || hex::encode(Sha256::digest(enc)) != meta.ciphertext_sha256 {
-        return Err(Error::CiphertextMismatch);
     }
     if &enc[..8] != FILE_MAGIC {
         return Err(Error::NotEncrypted);
@@ -187,9 +197,37 @@ const UNUSABLE_KEY: Error = Error::Malformed("this campaign key can't be used fo
 
 pub struct Sealed {
     pub meta: ZkMetadata,
-    pub encrypted: Vec<u8>,
-    pub proof: Vec<u8>,
+    /// The whole `.sealed` file: ciphertext, proof and footer.
+    pub file: Vec<u8>,
     pub gates: usize,
+}
+
+/// A proven file's parts: its metadata, the magic and ciphertext elements the
+/// proof commits to, and the proof. With `max_bytes`, a file claiming more
+/// plaintext than that is refused before its body is read.
+fn read_parts<R: Read + Seek>(file: &mut R, max_bytes: Option<u64>) -> Result<(ZkMetadata, Vec<u8>, Vec<u8>)> {
+    let f = container::read_footer(file)?;
+    if &f.magic != FILE_MAGIC {
+        return Err(Error::Format);
+    }
+    let meta = ZkMetadata::from_json(&f.json)?;
+    if let Some(max) = max_bytes {
+        if meta.plaintext_len > max {
+            return Err(Error::TooLarge(meta.plaintext_len, max));
+        }
+    }
+    let enc_len = ciphertext_len_for(meta.plaintext_len).ok_or(Error::Malformed("sizes are inconsistent"))?;
+    if (FILE_MAGIC.len() as u64).checked_add(f.body_len) != enc_len.checked_add(meta.proof_len) {
+        return Err(Error::Malformed("sizes are inconsistent"));
+    }
+    let mut enc = FILE_MAGIC.to_vec();
+    enc.resize(enc_len as usize, 0);
+    let mut proof = vec![0u8; meta.proof_len as usize];
+    container::seek_body(file)?;
+    if read_full(file, &mut enc[FILE_MAGIC.len()..])? != enc.len() - FILE_MAGIC.len() || read_full(file, &mut proof)? != proof.len() {
+        return Err(Error::Truncated);
+    }
+    Ok((meta, enc, proof))
 }
 
 /// Seal `data` as a proven file. Refuses files over `max_bytes`.
@@ -220,15 +258,14 @@ fn seal_and_prove_inner(campaign: &CampaignKey, file_name: &str, data: &[u8], ma
     for c in &ct {
         encrypted.extend_from_slice(&c.to_bytes());
     }
-    let meta = ZkMetadata {
+    let mut meta = ZkMetadata {
         format: FORMAT.to_string(),
         campaign_key: campaign.compressed_hex(),
         sealed_key: hex::encode(compressed(&r_pt)),
         file_name: file_name.to_string(),
         plaintext_len: len,
         fingerprint: hex::encode(fp.to_bytes()),
-        ciphertext_len: encrypted.len() as u64,
-        ciphertext_sha256: hex::encode(Sha256::digest(&encrypted)),
+        proof_len: 0,
     };
 
     let st = Statement { campaign: x_pt, sealed: r_pt, name_h, len, ct, fingerprint: fp };
@@ -249,22 +286,29 @@ fn seal_and_prove_inner(campaign: &CampaignKey, file_name: &str, data: &[u8], ma
     profile("prove (total)", t);
     let mut proof = PROOF_MAGIC.to_vec();
     proof.extend(pf.to_bytes());
+    meta.proof_len = proof.len() as u64;
 
     // Never hand out a proof that doesn't verify.
     let t = std::time::Instant::now();
     verify_with(&meta, campaign, &encrypted, &proof, max_bytes, Some((&gens, &cs.cons)))?;
     profile("self-check verification", t);
-    Ok(Sealed { meta, encrypted, proof, gates: cs.gates() })
+    let mut file = encrypted;
+    file.extend_from_slice(&proof);
+    file.extend(container::trailer(meta.to_json()?.as_bytes())?);
+    Ok(Sealed { meta, file, gates: cs.gates() })
 }
 
-/// Check a proven file before contributing. Needs no secret. Refuses files
-/// over `max_bytes`, so a hostile "proven" file can't exhaust the verifier.
+/// Check a proven `.sealed` file before contributing. Needs no secret.
+/// Refuses files over `max_bytes` before reading their body, so a hostile
+/// "proven" file can't exhaust the verifier.
 ///
 /// If this passes, the key the vault reveals opens the file to a
 /// `plaintext_len`-byte file with the committed fingerprint; if that
 /// fingerprint was computed from a known work, it is exactly that work.
-pub fn verify(meta: &ZkMetadata, campaign: &CampaignKey, encrypted: &[u8], proof: &[u8], max_bytes: u64) -> Result<()> {
-    verify_with(meta, campaign, encrypted, proof, max_bytes, None)
+pub fn verify<R: Read + Seek>(file: &mut R, campaign: &CampaignKey, max_bytes: u64) -> Result<ZkMetadata> {
+    let (meta, enc, proof) = read_parts(file, Some(max_bytes))?;
+    verify_with(&meta, campaign, &enc, &proof, max_bytes, None)?;
+    Ok(meta)
 }
 
 /// The self-check after proving can reuse the prover's generators and
@@ -319,11 +363,12 @@ fn verify_with(
     Ok(())
 }
 
-/// Decrypt a proven file with the revealed campaign secret.
-pub fn open(meta: &ZkMetadata, secret: &CampaignSecret, encrypted: &[u8]) -> Result<Vec<u8>> {
-    let result = open_inner(meta, secret, encrypted);
+/// Decrypt a proven `.sealed` file with the revealed campaign secret.
+pub fn open<R: Read + Seek>(file: &mut R, secret: &CampaignSecret) -> Result<(ZkMetadata, Vec<u8>)> {
+    let (meta, enc, _) = read_parts(file, None)?;
+    let result = open_inner(&meta, secret, &enc);
     crate::burn_stacks();
-    result
+    Ok((meta, result?))
 }
 
 fn open_inner(meta: &ZkMetadata, secret: &CampaignSecret, encrypted: &[u8]) -> Result<Vec<u8>> {
@@ -394,6 +439,24 @@ use super::*;
 
     fn sample(len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 7 + 3) as u8).collect()
+    }
+
+    /// The ciphertext (with magic) and proof inside a sealed file.
+    fn parts(s: &Sealed) -> (Vec<u8>, Vec<u8>) {
+        let (_, enc, proof) = read_parts(&mut std::io::Cursor::new(&s.file), None).unwrap();
+        (enc, proof)
+    }
+
+    fn verify_parts(meta: &ZkMetadata, pk: &CampaignKey, enc: &[u8], proof: &[u8], max: u64) -> Result<()> {
+        verify_with(meta, pk, enc, proof, max, None)
+    }
+
+    fn verify_file(file: &[u8], pk: &CampaignKey, max: u64) -> Result<ZkMetadata> {
+        verify(&mut std::io::Cursor::new(file), pk, max)
+    }
+
+    fn open_file(file: &[u8], sk: &CampaignSecret) -> Result<Vec<u8>> {
+        open(&mut std::io::Cursor::new(file), sk).map(|(_, pt)| pt)
     }
 
     #[test]
@@ -591,10 +654,12 @@ use super::*;
         for len in [0usize, 31, 100] {
             let data = sample(len);
             let s = seal_and_prove(&pk, "art.bin", &data, DEFAULT_MAX_BYTES).unwrap();
-            verify(&s.meta, &pk, &s.encrypted, &s.proof, DEFAULT_MAX_BYTES).unwrap();
-            assert_eq!(open(&s.meta, &sk, &s.encrypted).unwrap(), data);
+            assert_eq!(verify_file(&s.file, &pk, DEFAULT_MAX_BYTES).unwrap(), s.meta);
+            assert_eq!(open_file(&s.file, &sk).unwrap(), data);
             assert_eq!(s.meta.fingerprint, fingerprint_hex(&data));
-            assert!(s.proof.len() < 1700, "proof is {} bytes", s.proof.len());
+            assert!(s.meta.proof_len < 1700, "proof is {} bytes", s.meta.proof_len);
+            let m = crate::read_metadata(&mut std::io::Cursor::new(&s.file)).unwrap();
+            assert!(matches!(m, crate::SealedMeta::Proven(m) if m == s.meta));
         }
     }
 
@@ -604,30 +669,30 @@ use super::*;
         let pk = sk.public();
         let data = b"a small but important piece of art".to_vec();
         let s = seal_and_prove(&pk, "art.bin", &data, DEFAULT_MAX_BYTES).unwrap();
+        let (encrypted, proof) = parts(&s);
 
         let other = CampaignSecret::generate().public();
-        assert!(matches!(verify(&s.meta, &other, &s.encrypted, &s.proof, DEFAULT_MAX_BYTES), Err(Error::WrongCampaign)));
+        assert!(matches!(verify_file(&s.file, &other, DEFAULT_MAX_BYTES), Err(Error::WrongCampaign)));
 
         let mut m = s.meta.clone();
         m.file_name = "other.bin".into();
-        assert!(matches!(verify(&m, &pk, &s.encrypted, &s.proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
+        assert!(matches!(verify_parts(&m, &pk, &encrypted, &proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
 
         let mut m = s.meta.clone();
         m.fingerprint = fingerprint_hex(b"something else entirely");
-        assert!(matches!(verify(&m, &pk, &s.encrypted, &s.proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
+        assert!(matches!(verify_parts(&m, &pk, &encrypted, &proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
 
-        let mut enc = s.encrypted.clone();
+        let mut enc = encrypted.clone();
         enc[39] ^= 1;
-        let mut m = s.meta.clone();
-        m.ciphertext_sha256 = hex::encode(Sha256::digest(&enc));
-        assert!(matches!(verify(&m, &pk, &enc, &s.proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
+        assert!(matches!(verify_parts(&s.meta, &pk, &enc, &proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
 
-        let mut p = s.proof.clone();
+        let mut p = proof.clone();
         p[100] ^= 1;
-        assert!(verify(&s.meta, &pk, &s.encrypted, &p, DEFAULT_MAX_BYTES).is_err());
+        assert!(verify_parts(&s.meta, &pk, &encrypted, &p, DEFAULT_MAX_BYTES).is_err());
 
         let s2 = seal_and_prove(&pk, "art.bin", &data, DEFAULT_MAX_BYTES).unwrap();
-        assert!(matches!(verify(&s.meta, &pk, &s.encrypted, &s2.proof, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
+        let (_, proof2) = parts(&s2);
+        assert!(matches!(verify_parts(&s.meta, &pk, &encrypted, &proof2, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
     }
 
     #[test]
@@ -635,7 +700,8 @@ use super::*;
         // Build the real statement, then try to prove it with a different r.
         let pk = CampaignSecret::generate().public();
         let s = seal_and_prove(&pk, "art.bin", &sample(50), DEFAULT_MAX_BYTES).unwrap();
-        let p = parse(&s.meta, &s.encrypted).unwrap();
+        let (encrypted, _) = parts(&s);
+        let p = parse(&s.meta, &encrypted).unwrap();
         let st = Statement {
             campaign: p.x,
             sealed: p.r,
@@ -649,10 +715,10 @@ use super::*;
         assert!(!cs.is_satisfied());
         let n = cs.gates().next_power_of_two();
         let gens = Gens::new(n);
-        let pf = bp::prove(&cs, &gens, &mut transcript(&s.meta, &s.encrypted, n.trailing_zeros()));
+        let pf = bp::prove(&cs, &gens, &mut transcript(&s.meta, &encrypted, n.trailing_zeros()));
         let mut forged = PROOF_MAGIC.to_vec();
         forged.extend(pf.to_bytes());
-        assert!(matches!(verify(&s.meta, &pk, &s.encrypted, &forged, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
+        assert!(matches!(verify_parts(&s.meta, &pk, &encrypted, &forged, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
     }
 
     /// Regression for the review finding: a creator seals elements that are not
@@ -681,8 +747,7 @@ use super::*;
             file_name: name.into(),
             plaintext_len: len,
             fingerprint: hex::encode(fp.to_bytes()),
-            ciphertext_len: enc.len() as u64,
-            ciphertext_sha256: hex::encode(Sha256::digest(&enc)),
+            proof_len: 0,
         };
         let st = Statement { campaign: x_pt, sealed: r_pt, name_h: name_hash(name), len, ct, fingerprint: fp };
         let mut cs = Cs::new(true);
@@ -692,8 +757,8 @@ use super::*;
         let mut proof = PROOF_MAGIC.to_vec();
         proof.extend(pf.to_bytes());
 
-        verify(&meta, &pk, &enc, &proof, DEFAULT_MAX_BYTES).unwrap();
-        let opened = open(&meta, &sk, &enc).unwrap();
+        verify_parts(&meta, &pk, &enc, &proof, DEFAULT_MAX_BYTES).unwrap();
+        let opened = open_inner(&meta, &sk, &enc).unwrap();
         assert_eq!(opened.len(), 31);
         assert_ne!(fingerprint_hex(&opened), meta.fingerprint);
     }
@@ -702,22 +767,66 @@ use super::*;
     fn verification_refuses_oversized_files() {
         let pk = CampaignSecret::generate().public();
         let s = seal_and_prove(&pk, "a", &sample(40), DEFAULT_MAX_BYTES).unwrap();
-        assert!(matches!(verify(&s.meta, &pk, &s.encrypted, &s.proof, 39), Err(Error::TooLarge(40, 39))));
+        assert!(matches!(verify_file(&s.file, &pk, 39), Err(Error::TooLarge(40, 39))));
+    }
+
+    /// A hostile file claiming a huge plaintext is refused from its footer
+    /// alone, before any of its body is read.
+    #[test]
+    fn oversized_claims_are_refused_before_reading_the_body() {
+        let pk = CampaignSecret::generate().public();
+        let s = seal_and_prove(&pk, "a", &sample(40), DEFAULT_MAX_BYTES).unwrap();
+        let mut m = s.meta.clone();
+        m.plaintext_len = 1 << 40;
+        let mut file = FILE_MAGIC.to_vec();
+        file.extend(crate::container::trailer(m.to_json().unwrap().as_bytes()).unwrap());
+        assert!(matches!(verify_file(&file, &pk, DEFAULT_MAX_BYTES), Err(Error::TooLarge(_, _))));
+        assert!(matches!(open_file(&file, &CampaignSecret::generate()), Err(Error::Malformed("sizes are inconsistent"))));
+    }
+
+    #[test]
+    fn edited_footer_or_body_fails_as_a_whole_file() {
+        let sk = CampaignSecret::generate();
+        let pk = sk.public();
+        let s = seal_and_prove(&pk, "art.bin", b"proven, in one file", DEFAULT_MAX_BYTES).unwrap();
+        let (encrypted, proof) = parts(&s);
+        let rebuild = |m: &ZkMetadata, enc: &[u8], proof: &[u8]| {
+            let mut f = enc.to_vec();
+            f.extend_from_slice(proof);
+            f.extend(crate::container::trailer(m.to_json().unwrap().as_bytes()).unwrap());
+            f
+        };
+        let mut m = s.meta.clone();
+        m.fingerprint = fingerprint_hex(b"a different promise");
+        assert!(matches!(verify_file(&rebuild(&m, &encrypted, &proof), &pk, DEFAULT_MAX_BYTES), Err(Error::BadProof)));
+        let mut m = s.meta.clone();
+        m.proof_len += 1;
+        assert!(matches!(verify_file(&rebuild(&m, &encrypted, &proof), &pk, DEFAULT_MAX_BYTES), Err(Error::Malformed(_))));
+        let mut file = s.file.clone();
+        file[8] ^= 1;
+        assert!(verify_file(&file, &pk, DEFAULT_MAX_BYTES).is_err());
+        let mut longer = s.file.clone();
+        longer.push(0);
+        assert!(matches!(verify_file(&longer, &pk, DEFAULT_MAX_BYTES), Err(Error::NoFooter)));
+        let mut old = s.file.clone();
+        old[..8].copy_from_slice(b"CVZK1\0\0\0");
+        assert!(matches!(open_file(&old, &sk), Err(Error::OldFormat)));
     }
 
     #[test]
     fn absurd_sizes_are_rejected_not_wrapped() {
         assert_eq!(ciphertext_len_for(u64::MAX), None);
-        assert_eq!(crate::ciphertext_len_for(u64::MAX), None);
+        assert_eq!(crate::body_len_for(u64::MAX), None);
     }
 
     #[test]
     fn open_checks_the_fingerprint_and_size_limit_holds() {
         let sk = CampaignSecret::generate();
         let s = seal_and_prove(&sk.public(), "a", &sample(40), DEFAULT_MAX_BYTES).unwrap();
+        let (encrypted, _) = parts(&s);
         let mut m = s.meta.clone();
         m.fingerprint = fingerprint_hex(b"promised");
-        assert!(matches!(open(&m, &sk, &s.encrypted), Err(Error::FingerprintMismatch)));
+        assert!(matches!(open_inner(&m, &sk, &encrypted), Err(Error::FingerprintMismatch)));
         assert!(matches!(
             seal_and_prove(&sk.public(), "a", &sample(11), 10),
             Err(Error::TooLarge(11, 10))

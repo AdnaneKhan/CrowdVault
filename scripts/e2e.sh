@@ -73,7 +73,7 @@ echo "published fingerprint: $($VS fingerprint poem.txt)"
 
 echo "== Backer: verify against the vault's key, then contribute"
 for f in note.txt film.bin poem.txt; do
-  REPORT=$($VO verify --campaign-key "$CAMPAIGN_KEY" "sealed/$f.meta.json")
+  REPORT=$($VO verify --campaign-key "$CAMPAIGN_KEY" "sealed/$f.sealed")
   echo "${REPORT%%$'\n'*}"
 done
 cast send "$VAULT" "contribute()" --value 6ether --private-key $BACKER_KEY --rpc-url $RPC_URL > /dev/null
@@ -95,7 +95,7 @@ echo "phase: $PHASE (2 = Claimed), released $RELEASED ETH"
 echo "== Everyone: read the key from the vault and open"
 KEY=$(cast to-hex "$(cast call "$VAULT" 'revealedKey()(uint256)' --rpc-url $RPC_URL | awk '{print $1}')")
 for f in note.txt film.bin poem.txt; do
-  $VO open --secret "$KEY" "sealed/$f.meta.json" --out-dir opened > /dev/null
+  $VO open --secret "$KEY" "sealed/$f.sealed" --out-dir opened > /dev/null
   cmp -s "$f" "opened/$f" || fail "opened $f differs from the original"
   echo "opened $f: identical to the original"
 done

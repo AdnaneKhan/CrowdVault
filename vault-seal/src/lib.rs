@@ -1,26 +1,24 @@
 //! The library behind the CrowdVault tools: `vault-seal` (creators and the
 //! coordinator) and `vault-open` (backers).
 //!
-//! Sealing turns one file into two:
-//!
-//! * `<name>.enc`: the file encrypted in 64 KiB chunks (STREAM construction
-//!   over AES-256-GCM), so files of any size stream through without being
-//!   held in memory. Host it anywhere.
-//! * `<name>.meta.json`: the sealed key plus the file's name, size and BLAKE3
-//!   hashes.
+//! Sealing turns a file into one `<name>.sealed` file: the content encrypted
+//! in 64 KiB chunks (STREAM construction over AES-256-GCM), so files of any
+//! size stream through without being held in memory, followed by a footer of
+//! JSON metadata: the sealed key plus the file's name, size and BLAKE3 hash.
+//! See [`container`] for the layout.
 //!
 //! ```text
 //!   r           ← random scalar
-//!   sealed_key  = R = r·G                       (in the metadata)
+//!   sealed_key  = R = r·G                       (in the footer)
 //!   file key K  = BLAKE3-derive-key(context, r·X ‖ R ‖ X ‖ format ‖ name ‖ chunk size)
-//!   .enc        = MAGIC ‖ STREAM-AES-256-GCM(K, file)
-//!                 (the last chunk also authenticates the file's length and hash)
+//!   .sealed     = MAGIC ‖ STREAM-AES-256-GCM(K, file) ‖ footer ‖ footer length ‖ FOOTER_MAGIC
+//!                 (the last chunk also authenticates the footer, byte for byte)
 //! ```
 //!
 //! After the reveal, anyone computes K from x·R, because x·R = r·X.
 //!
 //! What anyone can check before the reveal, with certainty and no trust:
-//! the metadata names the vault's campaign key X, and `sealed_key` is a valid
+//! the footer names the vault's campaign key X, and `sealed_key` is a valid
 //! curve point. K is then a fixed function of x and public data, so the key
 //! the contract will reveal (it enforces x·G = X) is guaranteed to produce
 //! exactly this file key. There is no wrapped blob that could turn out not to
@@ -30,9 +28,9 @@
 //! under that key. After the reveal, [`open`] detects any mismatch against the
 //! creator's committed hash, and anyone can reproduce it.
 //!
-//! Every metadata field is bound in: the name and format feed the key, and the
-//! length and hash are authenticated by the last chunk, so an edited metadata
-//! file will not open.
+//! The whole footer is bound in: the name and format feed the key, and the
+//! last chunk authenticates the footer's exact bytes, so a file with any edit
+//! to its metadata will not open.
 //!
 //! Ephemeral secrets are wiped as soon as they are used: r, r·X and K live in
 //! zeroizing wrappers, the AES key schedule sits in its own allocation that is
@@ -40,9 +38,10 @@
 //! seal and open ends by overwriting the stacks of all threads involved
 //! ([`burn_stacks`]), where moves and library internals leave stray copies.
 
+pub mod container;
 pub mod zk;
 
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 
 use rayon::prelude::*;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
@@ -55,8 +54,8 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use zeroize::{Zeroize, Zeroizing};
 
-pub const FORMAT: &str = "crowdvault-seal/2";
-pub const FILE_MAGIC: &[u8; 8] = b"CVENC2\0\0";
+pub const FORMAT: &str = "crowdvault-seal/3";
+pub const FILE_MAGIC: &[u8; 8] = b"CVSEAL3\0";
 pub const CHUNK_SIZE: usize = 64 * 1024;
 const TAG_LEN: u64 = 16;
 /// A chunk on disk: ciphertext and its tag.
@@ -64,9 +63,9 @@ const CT_CHUNK: usize = CHUNK_SIZE + TAG_LEN as usize;
 /// Chunks per batch (4 MiB), enough to split across cores.
 const BATCH: usize = 64;
 /// BLAKE3 key-derivation context: hard-coded, unique to this use.
-const KEY_CONTEXT: &str = "CrowdVault vault-seal 2026-09-28 file key v2";
-const CHUNK_AAD: &[u8] = b"crowdvault/2/chunk";
-const LAST_CHUNK_AAD: &[u8] = b"crowdvault/2/last-chunk";
+const KEY_CONTEXT: &str = "CrowdVault vault-seal 2026-09-28 file key v3";
+const CHUNK_AAD: &[u8] = b"crowdvault/3/chunk";
+const LAST_CHUNK_AAD: &[u8] = b"crowdvault/3/last-chunk";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -80,23 +79,25 @@ pub enum Error {
     Malformed(&'static str),
     #[error("this file was sealed to a different campaign key")]
     WrongCampaign,
-    #[error("encrypted file does not match its metadata (wrong file, or altered)")]
-    CiphertextMismatch,
     #[error("secret does not match the campaign key")]
     WrongSecret,
-    #[error("not an encrypted CrowdVault file")]
+    #[error("not a sealed CrowdVault file")]
     NotEncrypted,
-    #[error("encrypted file or its metadata was altered, corrupted or reordered")]
+    #[error("this is the earlier two-file format (a .enc beside a .meta.json), which this version doesn't read; seal the original again")]
+    OldFormat,
+    #[error("sealed file is incomplete, or has extra data at the end: its metadata footer is missing")]
+    NoFooter,
+    #[error("sealed file or its metadata was altered, corrupted or reordered")]
     Decrypt,
-    #[error("encrypted file is truncated")]
+    #[error("sealed file is truncated")]
     Truncated,
-    #[error("encrypted file has unexpected data after the end")]
+    #[error("sealed file has unexpected data after the end")]
     TrailingData,
     #[error("decrypted file does not match the hash the creator committed to (creator fault)")]
     PlaintextHash,
     #[error("proof is invalid: it does not show that this file opens as committed")]
     BadProof,
-    #[error("proof file is missing or malformed")]
+    #[error("proof is missing or malformed")]
     MalformedProof,
     #[error("file is {0} bytes; proofs are limited to {1} bytes (raise the limit with --max-kib)")]
     TooLarge(u64, u64),
@@ -207,7 +208,7 @@ fn parse_point(bytes: &[u8]) -> Result<AffinePoint> {
 }
 
 /// Metadata keys must be the exact 33-byte compressed encoding. Other valid
-/// SEC1 forms (uncompressed, compact) are refused, so one metadata file can only
+/// SEC1 forms (uncompressed, compact) are refused, so one footer can only
 /// ever mean one point and one file key.
 pub(crate) fn parse_canonical(hex_str: &str) -> Result<AffinePoint> {
     let bytes = hex::decode(hex_str).map_err(|_| Error::BadPoint)?;
@@ -237,8 +238,9 @@ pub(crate) fn nonzero_scalar() -> Zeroizing<Scalar> {
 
 // ============================================================ metadata
 
-/// The `.meta.json` file.
+/// The footer of an ordinary sealed file.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Metadata {
     pub format: String,
     /// X, compressed hex
@@ -249,9 +251,6 @@ pub struct Metadata {
     pub plaintext_len: u64,
     /// BLAKE3 of the plaintext, hex. The last chunk authenticates it.
     pub plaintext_blake3: String,
-    pub ciphertext_len: u64,
-    /// BLAKE3 of the whole `.enc` file, hex.
-    pub ciphertext_blake3: String,
     pub chunk_size: u64,
 }
 
@@ -260,11 +259,12 @@ fn put(buf: &mut Vec<u8>, field: &[u8]) {
     buf.extend_from_slice(field);
 }
 
-fn last_chunk_aad(plaintext_len: u64, plaintext_blake3_hex: &str) -> Vec<u8> {
+/// The last chunk authenticates the footer exactly as written, so no byte of
+/// the metadata can change without the file failing to open.
+fn last_chunk_aad(footer: &[u8]) -> Vec<u8> {
     let mut t = Vec::new();
     put(&mut t, LAST_CHUNK_AAD);
-    put(&mut t, &plaintext_len.to_be_bytes());
-    put(&mut t, plaintext_blake3_hex.as_bytes());
+    put(&mut t, footer);
     t
 }
 
@@ -273,8 +273,8 @@ impl Metadata {
         Ok(serde_json::to_string_pretty(self)?)
     }
 
-    pub fn from_json(s: &str) -> Result<Self> {
-        let m: Self = serde_json::from_str(s)?;
+    pub fn from_json(s: &[u8]) -> Result<Self> {
+        let m: Self = serde_json::from_slice(s)?;
         if m.format != FORMAT {
             return Err(Error::Format);
         }
@@ -288,9 +288,6 @@ impl Metadata {
         if self.chunk_size != CHUNK_SIZE as u64 {
             return Err(Error::Malformed("unsupported chunk size"));
         }
-        if Some(self.ciphertext_len) != ciphertext_len_for(self.plaintext_len) {
-            return Err(Error::Malformed("sizes are inconsistent"));
-        }
         Ok((parse_canonical(&self.campaign_key)?, parse_canonical(&self.sealed_key)?))
     }
 }
@@ -299,11 +296,50 @@ fn chunk_count(plaintext_len: u64) -> u64 {
     plaintext_len.div_ceil(CHUNK_SIZE as u64).max(1)
 }
 
-/// Size of the `.enc` file for a given plaintext size (None on overflow).
-pub fn ciphertext_len_for(plaintext_len: u64) -> Option<u64> {
-    (FILE_MAGIC.len() as u64)
-        .checked_add(plaintext_len)?
-        .checked_add(TAG_LEN.checked_mul(chunk_count(plaintext_len))?)
+/// Size of the encrypted chunks for a given plaintext size (None on overflow).
+pub fn body_len_for(plaintext_len: u64) -> Option<u64> {
+    plaintext_len.checked_add(TAG_LEN.checked_mul(chunk_count(plaintext_len))?)
+}
+
+/// The metadata of either kind of sealed file, read from its footer.
+#[derive(Debug, Clone)]
+pub enum SealedMeta {
+    Stream(Metadata),
+    Proven(zk::ZkMetadata),
+}
+
+impl SealedMeta {
+    pub fn file_name(&self) -> &str {
+        match self {
+            SealedMeta::Stream(m) => &m.file_name,
+            SealedMeta::Proven(m) => &m.file_name,
+        }
+    }
+}
+
+/// Reads a sealed file's metadata without checking anything else, to decide
+/// how to handle it.
+pub fn read_metadata<R: Read + Seek>(file: &mut R) -> Result<SealedMeta> {
+    let f = container::read_footer(file)?;
+    Ok(if &f.magic == zk::FILE_MAGIC {
+        SealedMeta::Proven(zk::ZkMetadata::from_json(&f.json)?)
+    } else {
+        SealedMeta::Stream(Metadata::from_json(&f.json)?)
+    })
+}
+
+/// An ordinary sealed file's footer, checked for shape and size.
+fn read_stream_footer<R: Read + Seek>(file: &mut R) -> Result<(Metadata, Vec<u8>, u64, AffinePoint, AffinePoint)> {
+    let f = container::read_footer(file)?;
+    if &f.magic != FILE_MAGIC {
+        return Err(Error::Format);
+    }
+    let meta = Metadata::from_json(&f.json)?;
+    let (x, r) = meta.check_shape()?;
+    if Some(f.body_len) != body_len_for(meta.plaintext_len) {
+        return Err(Error::Malformed("sizes are inconsistent"));
+    }
+    Ok((meta, f.json, f.body_len, x, r))
 }
 
 /// K = BLAKE3-derive-key(KEY_CONTEXT, S ‖ R ‖ X ‖ format ‖ name ‖ chunk size),
@@ -722,20 +758,13 @@ fn decrypt_chunks(cipher: &ChunkCipher, first: u64, ct: &mut [u8]) -> Result<()>
 
 // ============================================================ seal
 
-/// Encrypt `input` into `output` (the `.enc` file) under a key sealed to
-/// `campaign`, and return the metadata. Every ephemeral secret is wiped
-/// before this returns.
+/// Seal `input` into `output`, the whole `.sealed` file, under a key sealed to
+/// `campaign`, and return the metadata written to its footer. Every ephemeral
+/// secret is wiped before this returns.
 pub fn seal<R: Read + Send, W: Write + Send>(campaign: &CampaignKey, file_name: &str, input: R, output: W) -> Result<Metadata> {
     let result = seal_inner(campaign, file_name, input, output, None);
     burn_stacks();
     result
-}
-
-struct Sealed {
-    pt_len: u64,
-    pt_hex: String,
-    ct_len: u64,
-    ct_hex: String,
 }
 
 fn seal_inner<R: Read + Send, W: Write + Send>(
@@ -753,37 +782,35 @@ fn seal_inner<R: Read + Send, W: Write + Send>(
         let key = file_key(&shared, &r_pt, &x_pt, file_name);
         (r_pt, ChunkCipher::new(&key))
     }; // r, r·X and K are wiped here; the cipher holds the only key material.
-    let sealed = seal_stream(&cipher, &mut input, &mut output, lying_hash)?;
-    drop(cipher);
-    Ok(Metadata {
+    let template = Metadata {
         format: FORMAT.to_string(),
         campaign_key: campaign.compressed_hex(),
         sealed_key: hex::encode(compressed(&r_pt)),
         file_name: file_name.to_string(),
-        plaintext_len: sealed.pt_len,
-        plaintext_blake3: sealed.pt_hex,
-        ciphertext_len: sealed.ct_len,
-        ciphertext_blake3: sealed.ct_hex,
+        plaintext_len: 0,
+        plaintext_blake3: String::new(),
         chunk_size: CHUNK_SIZE as u64,
-    })
+    };
+    let meta = seal_stream(&cipher, &mut input, &mut output, template, lying_hash)?;
+    drop(cipher);
+    Ok(meta)
 }
 
 /// Batches of 64 chunks: hash the plaintext, encrypt the chunks (across cores
-/// when there are several), hash the ciphertext, write. Reading and writing
-/// overlap the work when there are spare cores. Only a full chunk can be
-/// followed by more data; the chunk with nothing after it is sealed as the
-/// last one, authenticating the length and plaintext hash, so truncation and
-/// edits are detectable.
+/// when there are several), write. Reading and writing overlap the work when
+/// there are spare cores. Only a full chunk can be followed by more data; the
+/// chunk with nothing after it is sealed as the last one, and by then the
+/// length and hash are known, so it authenticates the finished footer, which
+/// follows it. Truncation and edits are detectable.
 fn seal_stream<R: Read + Send, W: Write + Send>(
     cipher: &ChunkCipher,
     input: &mut R,
     out: &mut W,
+    mut meta: Metadata,
     lying_hash: Option<&str>,
-) -> Result<Sealed> {
+) -> Result<Metadata> {
     let mut pt_hash = blake3::Hasher::new();
-    let mut ct_hash = blake3::Hasher::new();
-    let (mut pt_len, mut ct_len, mut position) = (0u64, 0u64, 0u64);
-    let mut pt_hex = String::new();
+    let (mut pt_len, mut position) = (0u64, 0u64);
     with_writer(out, |put| {
         let mut ct = FILE_MAGIC.to_vec();
         for_each_piece(input, BATCH * CHUNK_SIZE, |pt, last| {
@@ -798,79 +825,62 @@ fn seal_stream<R: Read + Send, W: Write + Send>(
             encrypt_chunks(cipher, position, &pt[..body], &mut ct[start..start + regular * CT_CHUNK])?;
             position += regular as u64;
             if last {
-                let hex = match lying_hash {
+                meta.plaintext_len = pt_len;
+                meta.plaintext_blake3 = match lying_hash {
                     Some(h) => h.to_string(),
                     None => pt_hash.finalize().to_hex().to_string(),
                 };
-                let aad = last_chunk_aad(pt_len, &hex);
+                let footer = meta.to_json()?;
+                let trailer = container::trailer(footer.as_bytes())?;
+                let aad = last_chunk_aad(footer.as_bytes());
                 let slot = &mut ct[start + regular * CT_CHUNK..];
                 let n = pt.len() - body;
                 slot[..n].copy_from_slice(&pt[body..]);
                 let tag = cipher.seal(position, true, &aad, &mut slot[..n])?;
                 slot[n..].copy_from_slice(&tag);
-                pt_hex = hex;
+                ct.extend_from_slice(&trailer);
             }
-            hash_into(&mut ct_hash, &ct);
-            ct_len += ct.len() as u64;
             ct = put(std::mem::take(&mut ct))?;
             Ok(())
         })
     })?;
-    Ok(Sealed { pt_len, pt_hex, ct_len, ct_hex: ct_hash.finalize().to_hex().to_string() })
+    Ok(meta)
 }
 
 // ============================================================ verify
 
-/// Pre-reveal check, needing no secret.
+/// Pre-reveal check, needing no secret, and reading only the footer.
 ///
 /// Certain, no trust: the metadata names `campaign` (take it from the vault's
-/// `keyX()`/`keyY()`), and the sealed key is a valid curve point, so the key the
-/// vault reveals will produce exactly this file's key. If `encrypted` is given,
-/// the encrypted file also matches the metadata byte for byte.
+/// `keyX()`/`keyY()`), the sealed key is a valid curve point, so the key the
+/// vault reveals will produce exactly this file's key, and the file is the
+/// size its metadata says.
 ///
-/// Not checkable: whether the creator encrypted the promised content.
-pub fn verify<R: Read + Send>(meta: &Metadata, campaign: &CampaignKey, encrypted: Option<R>) -> Result<()> {
-    let (x, _) = meta.check_shape()?;
+/// Not checkable: whether the creator encrypted the promised content, or that
+/// the chunks are intact (only the key can tell; opening checks every byte).
+pub fn verify<R: Read + Seek>(file: &mut R, campaign: &CampaignKey) -> Result<Metadata> {
+    let (meta, _, _, x, _) = read_stream_footer(file)?;
     if x != campaign.0 {
         return Err(Error::WrongCampaign);
     }
-    if let Some(mut r) = encrypted {
-        let (len, digest) = hash_stream(&mut r)?;
-        if len != meta.ciphertext_len || digest.to_hex().as_str() != meta.ciphertext_blake3 {
-            return Err(Error::CiphertextMismatch);
-        }
-    }
-    Ok(())
-}
-
-/// Length and BLAKE3 of a stream, read ahead and hashed across cores when
-/// there are several.
-fn hash_stream<R: Read + Send>(r: &mut R) -> Result<(u64, blake3::Hash)> {
-    let mut h = blake3::Hasher::new();
-    let mut len = 0u64;
-    for_each_piece(r, BATCH * CHUNK_SIZE, |piece, _| {
-        hash_into(&mut h, piece);
-        len += piece.len() as u64;
-        Ok(())
-    })?;
-    Ok((len, h.finalize()))
+    Ok(meta)
 }
 
 // ============================================================ open
 
-/// Decrypt the `.enc` stream into `output` and check the creator's hash.
+/// Decrypt a `.sealed` file into `output` and check the creator's hash.
 ///
 /// Output is written as it is authenticated, batch by batch; on any error the
 /// caller must discard what was written (the CLI writes to a temporary file).
 /// The derived key is wiped before this returns.
-pub fn open<R: Read + Send, W: Write + Send>(meta: &Metadata, secret: &CampaignSecret, input: R, output: W) -> Result<()> {
-    let result = open_inner(meta, secret, input, output);
+pub fn open<R: Read + Seek + Send, W: Write + Send>(file: R, secret: &CampaignSecret, output: W) -> Result<Metadata> {
+    let result = open_inner(file, secret, output);
     burn_stacks();
     result
 }
 
-fn open_inner<R: Read + Send, W: Write + Send>(meta: &Metadata, secret: &CampaignSecret, mut input: R, mut output: W) -> Result<()> {
-    let (x_pt, r_pt) = meta.check_shape()?;
+fn open_inner<R: Read + Seek + Send, W: Write + Send>(mut file: R, secret: &CampaignSecret, mut output: W) -> Result<Metadata> {
+    let (meta, footer, body_len, x_pt, r_pt) = read_stream_footer(&mut file)?;
     if secret.public().0 != x_pt {
         return Err(Error::WrongSecret);
     }
@@ -879,18 +889,16 @@ fn open_inner<R: Read + Send, W: Write + Send>(meta: &Metadata, secret: &Campaig
         let key = file_key(&shared, &r_pt, &x_pt, &meta.file_name);
         ChunkCipher::new(&key)
     };
-    let mut magic = [0u8; 8];
-    if read_full(&mut input, &mut magic)? != 8 || &magic != FILE_MAGIC {
-        return Err(Error::NotEncrypted);
-    }
-    let digest = open_stream(&cipher, &mut input, &mut output, meta)?;
+    container::seek_body(&mut file)?;
+    let mut body = file.take(body_len);
+    let digest = open_stream(&cipher, &mut body, &mut output, &meta, &footer, body_len)?;
     drop(cipher);
     // The last chunk authenticated this hash as the creator's own claim, so a
     // mismatch here is the creator's fault, not tampering in transit.
     if digest.to_hex().as_str() != meta.plaintext_blake3 {
         return Err(Error::PlaintextHash);
     }
-    Ok(())
+    Ok(meta)
 }
 
 /// Batches of 64 chunks: decrypt across cores when there are several, hash
@@ -901,10 +909,11 @@ fn open_stream<R: Read + Send, W: Write + Send>(
     input: &mut R,
     out: &mut W,
     meta: &Metadata,
+    footer: &[u8],
+    expected: u64,
 ) -> Result<blake3::Hash> {
     let chunks = chunk_count(meta.plaintext_len);
     let last_len = (meta.plaintext_len - (chunks - 1) * CHUNK_SIZE as u64) as usize + TAG_LEN as usize;
-    let expected = meta.ciphertext_len - FILE_MAGIC.len() as u64;
     let mut h = blake3::Hasher::new();
     let (mut seen, mut position) = (0u64, 0u64);
     with_writer(out, |put| {
@@ -932,7 +941,7 @@ fn open_stream<R: Read + Send, W: Write + Send>(
                 plain.extend_from_slice(&c[..CHUNK_SIZE]);
             }
             if final_piece {
-                let aad = last_chunk_aad(meta.plaintext_len, &meta.plaintext_blake3);
+                let aad = last_chunk_aad(footer);
                 let n = cipher.open(chunks - 1, true, &aad, &mut ct[body..])?;
                 plain.extend_from_slice(&ct[body..body + n]);
             }
@@ -952,16 +961,34 @@ fn open_stream<R: Read + Send, W: Write + Send>(
 mod tests {
     use super::*;
 
+    use std::io::Cursor;
+
     fn seal_bytes(pk: &CampaignKey, data: &[u8]) -> (Metadata, Vec<u8>) {
-        let mut enc = Vec::new();
-        let meta = seal(pk, "goods.bin", data, &mut enc).unwrap();
-        (meta, enc)
+        let mut file = Vec::new();
+        let meta = seal(pk, "goods.bin", data, &mut file).unwrap();
+        (meta, file)
     }
 
-    fn open_bytes(meta: &Metadata, sk: &CampaignSecret, enc: &[u8]) -> Result<Vec<u8>> {
+    fn open_bytes(sk: &CampaignSecret, file: &[u8]) -> Result<Vec<u8>> {
         let mut out = Vec::new();
-        open(meta, sk, enc, &mut out)?;
+        open(Cursor::new(file), sk, &mut out)?;
         Ok(out)
+    }
+
+    fn verify_bytes(pk: &CampaignKey, file: &[u8]) -> Result<Metadata> {
+        verify(&mut Cursor::new(file), pk)
+    }
+
+    /// The same file with its footer replaced by `json`.
+    fn with_footer(file: &[u8], json: &str) -> Vec<u8> {
+        let f = container::read_footer(&mut Cursor::new(file)).unwrap();
+        let mut out = file[..8 + f.body_len as usize].to_vec();
+        out.extend(container::trailer(json.as_bytes()).unwrap());
+        out
+    }
+
+    fn footer_json(file: &[u8]) -> String {
+        String::from_utf8(container::read_footer(&mut Cursor::new(file)).unwrap().json).unwrap()
     }
 
     fn data(len: usize) -> Vec<u8> {
@@ -974,10 +1001,9 @@ mod tests {
         let pk = sk.public();
         for len in [0, 1, CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 1, 3 * CHUNK_SIZE + 5] {
             let d = data(len);
-            let (meta, enc) = seal_bytes(&pk, &d);
-            assert_eq!(enc.len() as u64, meta.ciphertext_len, "len {len}");
-            verify(&meta, &pk, Some(enc.as_slice())).unwrap();
-            assert_eq!(open_bytes(&meta, &sk, &enc).unwrap(), d, "len {len}");
+            let (meta, file) = seal_bytes(&pk, &d);
+            assert_eq!(verify_bytes(&pk, &file).unwrap(), meta, "len {len}");
+            assert_eq!(open_bytes(&sk, &file).unwrap(), d, "len {len}");
         }
     }
 
@@ -1118,12 +1144,12 @@ mod tests {
         for threads in [1, 4] {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
             let d = data(3 * CHUNK_SIZE + 5);
-            let (meta, enc) = pool.install(|| seal_bytes(&sk.public(), &d));
+            let (meta, file) = pool.install(|| seal_bytes(&sk.public(), &d));
             let ((mk, kmask), (ms, smask)) = masked_secrets(&meta, &sk);
             burn_stack(); // this test's own derivation
             assert!(!memory_contains(&mk, &kmask), "file key survived sealing ({threads} threads)");
             assert!(!memory_contains(&ms, &smask), "shared secret survived sealing ({threads} threads)");
-            assert_eq!(pool.install(|| open_bytes(&meta, &sk, &enc)).unwrap(), d);
+            assert_eq!(pool.install(|| open_bytes(&sk, &file)).unwrap(), d);
             assert!(!memory_contains(&mk, &kmask), "file key survived opening ({threads} threads)");
             assert!(!memory_contains(&ms, &smask), "shared secret survived opening ({threads} threads)");
         }
@@ -1137,15 +1163,17 @@ mod tests {
     }
 
     #[test]
-    fn earlier_format_is_refused() {
+    fn earlier_formats_are_refused() {
         let sk = CampaignSecret::generate();
-        let (meta, enc) = seal_bytes(&sk.public(), b"hello");
-        let mut json = meta.to_json().unwrap();
-        json = json.replace("crowdvault-seal/2", "crowdvault-seal/1");
-        assert!(matches!(Metadata::from_json(&json), Err(Error::Format)));
-        let mut old = enc.clone();
-        old[..8].copy_from_slice(b"CVENC1\0\0");
-        assert!(matches!(open_bytes(&meta, &sk, &old), Err(Error::NotEncrypted)));
+        let (meta, file) = seal_bytes(&sk.public(), b"hello");
+        let json = meta.to_json().unwrap().replace("crowdvault-seal/3", "crowdvault-seal/2");
+        assert!(matches!(Metadata::from_json(json.as_bytes()), Err(Error::Format)));
+        assert!(matches!(open_bytes(&sk, &with_footer(&file, &json)), Err(Error::Format)));
+        // The two-file format: an .enc file, or its .meta.json passed by mistake.
+        let mut old = file.clone();
+        old[..8].copy_from_slice(b"CVENC2\0\0");
+        assert!(matches!(open_bytes(&sk, &old), Err(Error::OldFormat)));
+        assert!(matches!(open_bytes(&sk, meta.to_json().unwrap().as_bytes()), Err(Error::OldFormat)));
     }
 
     #[test]
@@ -1156,114 +1184,132 @@ mod tests {
             let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
             for len in [0, 1, CHUNK_SIZE, CHUNK_SIZE + 1, BATCH * CHUNK_SIZE + 5, 3 * BATCH * CHUNK_SIZE] {
                 let d = data(len);
-                let (meta, enc) = pool.install(|| seal_bytes(&pk, &d));
-                assert_eq!(meta.ciphertext_len, enc.len() as u64, "{threads} threads, {len} bytes");
-                assert_eq!(pool.install(|| open_bytes(&meta, &sk, &enc)).unwrap(), d, "{threads} threads, {len} bytes");
-                let mut longer = enc.clone();
+                let (meta, file) = pool.install(|| seal_bytes(&pk, &d));
+                assert_eq!(meta.plaintext_len, len as u64, "{threads} threads, {len} bytes");
+                assert_eq!(pool.install(|| open_bytes(&sk, &file)).unwrap(), d, "{threads} threads, {len} bytes");
+                let mut longer = file.clone();
                 longer.push(0);
-                assert!(matches!(pool.install(|| open_bytes(&meta, &sk, &longer)), Err(Error::TrailingData)));
-                assert!(matches!(pool.install(|| open_bytes(&meta, &sk, &enc[..enc.len() - 1])), Err(Error::Truncated)));
-                let mut flipped = enc.clone();
+                assert!(matches!(pool.install(|| open_bytes(&sk, &longer)), Err(Error::NoFooter)));
+                assert!(matches!(pool.install(|| open_bytes(&sk, &file[..file.len() - 1])), Err(Error::NoFooter)));
+                let mut flipped = file.clone();
                 flipped[FILE_MAGIC.len()] ^= 1;
-                assert!(matches!(pool.install(|| open_bytes(&meta, &sk, &flipped)), Err(Error::Decrypt)));
+                assert!(matches!(pool.install(|| open_bytes(&sk, &flipped)), Err(Error::Decrypt)));
             }
         }
     }
 
     #[test]
-    fn verify_reads_ahead_with_spare_cores() {
+    fn verify_reads_only_the_footer() {
         let pk = CampaignSecret::generate().public();
-        for threads in [1, 4] {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
-            for len in [0, 1, (1 << 20) - 30, 3 << 20] {
-                let (meta, enc) = seal_bytes(&pk, &data(len));
-                assert!(pool.install(|| verify(&meta, &pk, Some(&enc[..]))).is_ok(), "{threads} threads, {len} bytes");
-                let mut bad = enc.clone();
-                *bad.last_mut().unwrap() ^= 1;
-                assert!(matches!(pool.install(|| verify(&meta, &pk, Some(&bad[..]))), Err(Error::CiphertextMismatch)));
-                assert!(matches!(
-                    pool.install(|| verify(&meta, &pk, Some(&enc[..enc.len() - 1]))),
-                    Err(Error::CiphertextMismatch)
-                ));
-            }
-        }
+        let (meta, file) = seal_bytes(&pk, &data(3 * CHUNK_SIZE + 7));
+        // Damaged chunks can't be seen without the key; opening catches them.
+        let mut damaged = file.clone();
+        damaged[100] ^= 1;
+        assert_eq!(verify_bytes(&pk, &damaged).unwrap(), meta);
+        // A file of the wrong size for its metadata is refused.
+        let mut cut = file[..8 + CT_CHUNK].to_vec();
+        cut.extend(container::trailer(footer_json(&file).as_bytes()).unwrap());
+        assert!(matches!(verify_bytes(&pk, &cut), Err(Error::Malformed("sizes are inconsistent"))));
+        assert!(matches!(verify_bytes(&pk, &file[..file.len() - 3]), Err(Error::NoFooter)));
+        assert!(matches!(verify_bytes(&pk, b"CVSEAL3\0"), Err(Error::NoFooter)));
+        assert!(matches!(verify_bytes(&pk, b"plain text, not sealed"), Err(Error::NotEncrypted)));
+    }
+
+    #[test]
+    fn footer_rejects_absurd_lengths() {
+        let pk = CampaignSecret::generate().public();
+        let (_, file) = seal_bytes(&pk, b"x");
+        let mut huge = file.clone();
+        let at = huge.len() - 12;
+        huge[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(verify_bytes(&pk, &huge), Err(Error::Malformed("footer length"))));
+        assert!(container::trailer(&vec![b' '; container::MAX_FOOTER + 1]).is_err());
     }
 
     #[test]
     fn metadata_survives_json() {
         let sk = CampaignSecret::generate();
-        let (meta, enc) = seal_bytes(&sk.public(), b"hello");
-        let back = Metadata::from_json(&meta.to_json().unwrap()).unwrap();
+        let (meta, file) = seal_bytes(&sk.public(), b"hello");
+        let back = Metadata::from_json(meta.to_json().unwrap().as_bytes()).unwrap();
         assert_eq!(back, meta);
-        assert_eq!(open_bytes(&back, &sk, &enc).unwrap(), b"hello");
+        assert_eq!(footer_json(&file), meta.to_json().unwrap());
+        assert_eq!(open_bytes(&sk, &file).unwrap(), b"hello");
+        assert!(matches!(read_metadata(&mut Cursor::new(&file)).unwrap(), SealedMeta::Stream(m) if m == meta));
     }
 
     #[test]
     fn wrong_secret_rejected() {
-        let (meta, enc) = seal_bytes(&CampaignSecret::generate().public(), b"x");
-        assert!(matches!(open_bytes(&meta, &CampaignSecret::generate(), &enc), Err(Error::WrongSecret)));
+        let (_, file) = seal_bytes(&CampaignSecret::generate().public(), b"x");
+        assert!(matches!(open_bytes(&CampaignSecret::generate(), &file), Err(Error::WrongSecret)));
     }
 
     #[test]
-    fn verify_rejects_other_campaign_and_other_file() {
+    fn verify_rejects_other_campaign() {
         let pk = CampaignSecret::generate().public();
-        let (meta, enc) = seal_bytes(&pk, b"one");
+        let (_, file) = seal_bytes(&pk, b"one");
         let other = CampaignSecret::generate().public();
-        assert!(matches!(verify(&meta, &other, None::<&[u8]>), Err(Error::WrongCampaign)));
-        let (_, enc2) = seal_bytes(&pk, b"two");
-        assert!(matches!(verify(&meta, &pk, Some(enc2.as_slice())), Err(Error::CiphertextMismatch)));
-        verify(&meta, &pk, Some(enc.as_slice())).unwrap();
+        assert!(matches!(verify_bytes(&other, &file), Err(Error::WrongCampaign)));
+        verify_bytes(&pk, &file).unwrap();
     }
 
     #[test]
     fn edited_metadata_will_not_open() {
         let sk = CampaignSecret::generate();
-        let (meta, enc) = seal_bytes(&sk.public(), b"the goods");
-        let mut renamed = meta.clone();
-        renamed.file_name = "something-else.png".into();
-        assert!(matches!(open_bytes(&renamed, &sk, &enc), Err(Error::Decrypt)));
-        let mut rehashed = meta.clone();
-        rehashed.plaintext_blake3 = blake3::hash(b"promised").to_hex().to_string();
-        assert!(matches!(open_bytes(&rehashed, &sk, &enc), Err(Error::Decrypt)));
-        let mut rekeyed = meta.clone();
-        rekeyed.sealed_key = seal_bytes(&sk.public(), b"other").0.sealed_key;
-        assert!(matches!(open_bytes(&rekeyed, &sk, &enc), Err(Error::Decrypt)));
+        let (meta, file) = seal_bytes(&sk.public(), b"the goods");
+        let edit = |f: &dyn Fn(&mut Metadata)| {
+            let mut m = meta.clone();
+            f(&mut m);
+            with_footer(&file, &m.to_json().unwrap())
+        };
+        let renamed = edit(&|m| m.file_name = "something-else.png".into());
+        assert!(matches!(open_bytes(&sk, &renamed), Err(Error::Decrypt)));
+        let rehashed = edit(&|m| m.plaintext_blake3 = blake3::hash(b"promised").to_hex().to_string());
+        assert!(matches!(open_bytes(&sk, &rehashed), Err(Error::Decrypt)));
+        let other_key = seal_bytes(&sk.public(), b"other").0.sealed_key;
+        let rekeyed = edit(&|m| m.sealed_key = other_key.clone());
+        assert!(matches!(open_bytes(&sk, &rekeyed), Err(Error::Decrypt)));
+        let resized = edit(&|m| m.plaintext_len += 1);
+        assert!(matches!(open_bytes(&sk, &resized), Err(Error::Malformed("sizes are inconsistent"))));
+        // Even a change that means the same thing: the footer is authenticated byte for byte.
+        let compact = serde_json::to_string(&meta).unwrap();
+        assert!(matches!(open_bytes(&sk, &with_footer(&file, &compact)), Err(Error::Decrypt)));
+        let extra = footer_json(&file).replacen('{', "{\"note\": \"hi\",", 1);
+        assert!(matches!(open_bytes(&sk, &with_footer(&file, &extra)), Err(Error::Json(_))));
     }
 
     #[test]
     fn tampered_ciphertext_rejected() {
         let sk = CampaignSecret::generate();
-        let (meta, mut enc) = seal_bytes(&sk.public(), &data(2 * CHUNK_SIZE + 10));
-        enc[100] ^= 1;
-        assert!(matches!(open_bytes(&meta, &sk, &enc), Err(Error::Decrypt)));
+        let (_, mut file) = seal_bytes(&sk.public(), &data(2 * CHUNK_SIZE + 10));
+        file[100] ^= 1;
+        assert!(matches!(open_bytes(&sk, &file), Err(Error::Decrypt)));
     }
 
     #[test]
-    fn truncation_and_trailing_data_rejected() {
+    fn missing_chunks_rejected() {
         let sk = CampaignSecret::generate();
-        let (meta, enc) = seal_bytes(&sk.public(), &data(3 * CHUNK_SIZE));
-        let cut = &enc[..enc.len() - (CHUNK_SIZE + 16)];
-        assert!(matches!(open_bytes(&meta, &sk, cut), Err(Error::Truncated)));
-        let mut longer = enc.clone();
-        longer.push(0);
-        assert!(matches!(open_bytes(&meta, &sk, &longer), Err(Error::TrailingData)));
+        let (_, file) = seal_bytes(&sk.public(), &data(3 * CHUNK_SIZE));
+        // Drop the last chunk but keep the footer: the sizes no longer agree.
+        let mut cut = file[..8 + 2 * CT_CHUNK].to_vec();
+        cut.extend(container::trailer(footer_json(&file).as_bytes()).unwrap());
+        assert!(matches!(open_bytes(&sk, &cut), Err(Error::Malformed("sizes are inconsistent"))));
     }
 
     #[test]
     fn swapped_chunks_rejected() {
         let sk = CampaignSecret::generate();
-        let (meta, mut enc) = seal_bytes(&sk.public(), &data(3 * CHUNK_SIZE));
+        let (_, mut file) = seal_bytes(&sk.public(), &data(3 * CHUNK_SIZE));
         let c = CHUNK_SIZE + 16;
-        let (a, b) = enc[8..8 + 2 * c].split_at_mut(c);
+        let (a, b) = file[8..8 + 2 * c].split_at_mut(c);
         a.swap_with_slice(b);
-        assert!(matches!(open_bytes(&meta, &sk, &enc), Err(Error::Decrypt)));
+        assert!(matches!(open_bytes(&sk, &file), Err(Error::Decrypt)));
     }
 
     #[test]
     fn not_an_encrypted_file() {
         let sk = CampaignSecret::generate();
-        let (meta, _) = seal_bytes(&sk.public(), b"x");
-        assert!(matches!(open_bytes(&meta, &sk, b"plain text"), Err(Error::NotEncrypted)));
+        assert!(matches!(open_bytes(&sk, b"plain text"), Err(Error::NotEncrypted)));
+        assert!(matches!(open_bytes(&sk, b""), Err(Error::NotEncrypted)));
     }
 
     #[test]
@@ -1279,16 +1325,18 @@ mod tests {
     #[test]
     fn verify_rejects_invalid_sealed_key() {
         let pk = CampaignSecret::generate().public();
-        let (mut meta, _) = seal_bytes(&pk, b"x");
+        let (meta, file) = seal_bytes(&pk, b"x");
+        let with_key = |k: String| {
+            let mut m = meta.clone();
+            m.sealed_key = k;
+            with_footer(&file, &m.to_json().unwrap())
+        };
         // The 0x05 "compact" form is valid SEC1 but not canonical here.
-        meta.sealed_key = format!("05{}", &meta.sealed_key[2..]);
-        assert!(matches!(verify(&meta, &pk, None::<&[u8]>), Err(Error::BadPoint)));
-        meta.sealed_key = "00".into();
-        assert!(matches!(verify(&meta, &pk, None::<&[u8]>), Err(Error::BadPoint)));
+        assert!(matches!(verify_bytes(&pk, &with_key(format!("05{}", &meta.sealed_key[2..]))), Err(Error::BadPoint)));
+        assert!(matches!(verify_bytes(&pk, &with_key("00".into())), Err(Error::BadPoint)));
         // Uncompressed form of a valid point is refused too.
         let (x, y) = pk.xy_hex();
-        meta.sealed_key = format!("04{}{}", &x[2..], &y[2..]);
-        assert!(matches!(verify(&meta, &pk, None::<&[u8]>), Err(Error::BadPoint)));
+        assert!(matches!(verify_bytes(&pk, &with_key(format!("04{}{}", &x[2..], &y[2..]))), Err(Error::BadPoint)));
     }
 
     #[test]
@@ -1299,9 +1347,9 @@ mod tests {
         let pk = sk.public();
         for i in 0..20u8 {
             let d = vec![i; 1000 + i as usize];
-            let (meta, enc) = seal_bytes(&pk, &d);
-            verify(&meta, &pk, Some(enc.as_slice())).unwrap();
-            assert_eq!(open_bytes(&meta, &sk, &enc).unwrap(), d);
+            let (_, file) = seal_bytes(&pk, &d);
+            verify_bytes(&pk, &file).unwrap();
+            assert_eq!(open_bytes(&sk, &file).unwrap(), d);
         }
     }
 
@@ -1310,10 +1358,10 @@ mod tests {
         let sk = CampaignSecret::generate();
         let pk = sk.public();
         let promised = blake3::hash(b"what was promised").to_hex().to_string();
-        let mut enc = Vec::new();
-        let meta = seal_inner(&pk, "promise.mp4", &b"junk"[..], &mut enc, Some(&promised)).unwrap();
-        verify(&meta, &pk, Some(enc.as_slice())).unwrap();
-        assert!(matches!(open_bytes(&meta, &sk, &enc), Err(Error::PlaintextHash)));
+        let mut file = Vec::new();
+        seal_inner(&pk, "promise.mp4", &b"junk"[..], &mut file, Some(&promised)).unwrap();
+        verify_bytes(&pk, &file).unwrap();
+        assert!(matches!(open_bytes(&sk, &file), Err(Error::PlaintextHash)));
     }
 
     #[test]

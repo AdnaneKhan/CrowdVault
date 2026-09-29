@@ -42,8 +42,9 @@ enum Cmd {
         #[arg(long, default_value = "campaign.secret")]
         secret_file: PathBuf,
     },
-    /// Seal a file: writes <file>.enc (share anywhere) and <file>.meta.json
-    /// (the sealed key). Anyone can do this; no secret needed.
+    /// Seal a file into <file>.sealed, one file to share anywhere: the content
+    /// encrypted, with its metadata (the sealed key) in a footer. Anyone can do
+    /// this; no secret needed.
     Seal {
         /// Campaign public key (compressed or uncompressed SEC1 hex)
         #[arg(long)]
@@ -52,9 +53,9 @@ enum Cmd {
         /// Directory for the outputs (default: next to the input)
         #[arg(long)]
         out_dir: Option<PathBuf>,
-        /// Also write <file>.proof: a zero-knowledge proof (about 1.5 KB) that
-        /// the key this vault reveals opens the file to exactly its
-        /// fingerprint. For small files.
+        /// Also include a zero-knowledge proof (about 1.5 KB) that the key this
+        /// vault reveals opens the file to exactly its fingerprint. For small
+        /// files.
         #[arg(long)]
         prove: bool,
         /// Largest file --prove accepts, in KiB
@@ -100,42 +101,35 @@ fn main() -> Result<()> {
             let name = input.file_name().and_then(|n| n.to_str()).context("input has no file name")?.to_string();
             let dir = out_dir.unwrap_or_else(|| input.parent().map(Path::to_path_buf).unwrap_or_default());
             fs::create_dir_all(&dir)?;
-            let enc_path = dir.join(format!("{name}.enc"));
-            let meta_path = dir.join(format!("{name}.meta.json"));
+            let path = dir.join(format!("{name}.sealed"));
+            let tmp = with_suffix(&path, ".partial");
 
             if prove {
                 let data = fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
                 eprintln!("Sealing {name} with a proof ({} bytes)…", data.len());
                 let started = Instant::now();
                 let sealed = zk::seal_and_prove(&pk, &name, &data, kib(max_kib)?)?;
-                let proof_path = dir.join(format!("{name}.proof"));
-                fs::write(&enc_path, &sealed.encrypted)?;
-                fs::write(&meta_path, sealed.meta.to_json()?)?;
-                fs::write(&proof_path, &sealed.proof)?;
+                fs::write(&tmp, &sealed.file)?;
+                fs::rename(&tmp, &path)?;
                 out!("Sealed {} with a proof", input.display());
-                out!("  encrypted file: {}", enc_path.display());
-                out!("  metadata:       {}", meta_path.display());
-                out!("  proof:          {} ({} bytes)", proof_path.display(), sealed.proof.len());
-                out!("  fingerprint:    {}", sealed.meta.fingerprint);
+                out!("  sealed file: {} ({} bytes, of which {} are the proof)", path.display(), sealed.file.len(), sealed.meta.proof_len);
+                out!("  fingerprint: {}", sealed.meta.fingerprint);
                 out!("  {} gates, proved and self-checked in {:.1?}", sealed.gates, started.elapsed());
                 return Ok(());
             }
 
             let reader = BufReader::new(File::open(&input).with_context(|| format!("reading {}", input.display()))?);
-            let tmp = with_suffix(&enc_path, ".partial");
-            let meta = {
+            {
                 let mut w = BufWriter::new(File::create(&tmp)?);
                 let m = seal(&pk, &name, reader, &mut w);
                 drop(w);
                 m.inspect_err(|_| {
                     let _ = fs::remove_file(&tmp);
-                })?
-            };
-            fs::rename(&tmp, &enc_path)?;
-            fs::write(&meta_path, meta.to_json()?)?;
+                })?;
+            }
+            fs::rename(&tmp, &path)?;
             out!("Sealed {}", input.display());
-            out!("  encrypted file: {}", enc_path.display());
-            out!("  metadata:       {}", meta_path.display());
+            out!("  sealed file: {}", path.display());
         }
         Cmd::Fingerprint { input } => fingerprint(&input)?,
     }

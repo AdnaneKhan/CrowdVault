@@ -42,7 +42,8 @@ Before finishing a change, run the checks for every part you touched. CI (`.gith
 **Cryptography and the CLIs**
 - File formats are versioned (`FORMAT` in `lib.rs` and `zk/mod.rs`, and `KEY_CONTEXT`). Any change to how files are encrypted or keys are derived needs a new format version. Old files must be refused, not misread.
 - Secrets are wiped after use: use `Zeroizing`/`zeroize` for anything derived from a secret. Both binaries install the `WipeOnFree` global allocator from `common`. A test scans process memory for leftover secrets, so a leak fails the tests on Linux.
-- Never use the file name in a `.meta.json` as a path. `vault-open open` reduces it to a bare file name. Keep that.
+- A sealed file is one file: body, then a JSON metadata footer (`src/container.rs`). Never use the file name in the footer as a path; `vault-open open` reduces it to a bare file name. Keep that.
+- The last chunk of an ordinary sealed file authenticates the footer's exact bytes, and a proven file's footer fields are in the proof transcript. Keep every footer field bound one of those ways.
 - Write outputs to a `.partial` file and rename only on success, so a failure never leaves a half-written file under the real name.
 - A command that handles a secret must call `warn_if_not_hardened()` before it touches the secret.
 - Print to stdout with the `out!` macro from `common`, not `println!`, so a closed pipe doesn't panic.

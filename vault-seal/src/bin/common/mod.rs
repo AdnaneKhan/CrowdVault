@@ -3,11 +3,12 @@
 #![allow(dead_code)]
 
 use std::alloc::System;
-use std::fs;
+use std::fs::{self, File};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use vault_seal::{zk, CampaignKey, CampaignSecret, Metadata};
+use vault_seal::{zk, CampaignKey, CampaignSecret};
 
 /// Like println!, but a closed pipe (e.g. `vault-open verify ... | head -1`)
 /// ends output quietly instead of panicking.
@@ -21,20 +22,6 @@ pub(crate) use out;
 
 #[global_allocator]
 static ALLOCATOR: vault_seal::WipeOnFree<System> = vault_seal::WipeOnFree(System);
-
-pub enum AnyMeta {
-    Stream(Metadata),
-    Zk(zk::ZkMetadata),
-}
-
-impl AnyMeta {
-    pub fn file_name(&self) -> &str {
-        match self {
-            AnyMeta::Stream(m) => &m.file_name,
-            AnyMeta::Zk(m) => &m.file_name,
-        }
-    }
-}
 
 /// Keep secrets out of core dumps, and out of reach of other processes of the
 /// same user while the tool runs: on Linux by marking the process
@@ -94,22 +81,9 @@ pub fn kib(v: u64) -> Result<u64> {
     v.checked_mul(1024).context("--max-kib is too large")
 }
 
-pub fn read_meta(p: &Path) -> Result<AnyMeta> {
-    let s = fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
-    let v: serde_json::Value = serde_json::from_str(&s).context("metadata is not valid JSON")?;
-    Ok(match v.get("format").and_then(|f| f.as_str()) {
-        Some(zk::FORMAT) => AnyMeta::Zk(zk::ZkMetadata::from_json(&s)?),
-        _ => AnyMeta::Stream(Metadata::from_json(&s)?),
-    })
-}
-
-/// `name.meta.json` -> `name.enc` / `name.proof`
-pub fn sibling(meta: &Path, ext: &str) -> PathBuf {
-    let s = meta.to_string_lossy();
-    match s.strip_suffix(".meta.json") {
-        Some(base) => PathBuf::from(format!("{base}{ext}")),
-        None => with_suffix(meta, ext),
-    }
+/// Opens a sealed file for reading, buffered.
+pub fn open_sealed(p: &Path) -> Result<BufReader<File>> {
+    Ok(BufReader::new(File::open(p).with_context(|| format!("reading {}", p.display()))?))
 }
 
 pub fn with_suffix(p: &Path, suffix: &str) -> PathBuf {

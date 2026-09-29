@@ -32,7 +32,7 @@ If the goal is never reached, backers withdraw their money. Nothing is lost.
 
 ### For backers
 
-Install the backer tool (needs [Rust](https://rustup.rs)):
+Download `vault-open` ready to run (see [Prebuilt binaries](#prebuilt-binaries)), or build it with [Rust](https://rustup.rs):
 
 ```bash
 cargo install --path vault-seal --bin vault-open    # from the root of this repo
@@ -48,6 +48,20 @@ After the unlock, open it:
 
 ```bash
 vault-open open --secret <key from the vault page> artwork.png.sealed
+```
+
+### Prebuilt binaries
+
+Every push to `main` builds both tools for Linux (x86_64 and arm64), macOS (one universal binary for Apple silicon and Intel) and Windows (x86_64 and arm64), and checks each build by sealing and opening sample files.
+
+1. Open the latest successful [Build binaries](https://github.com/AdnaneKhan/CrowdVault/actions/workflows/build.yml) run. Downloading needs a GitHub account.
+2. Under **Artifacts**, download `crowdvault-tools-<your platform>`. It holds an archive with `vault-seal`, `vault-open` and the license, and a `.sha256` checksum to compare it with.
+3. Unpack it and put the tools somewhere on your `PATH`.
+
+The Linux builds need glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36 and newer). The macOS builds are signed with the hardened runtime but not notarized, so if macOS refuses to open them, allow them once:
+
+```bash
+xattr -d com.apple.quarantine vault-seal vault-open
 ```
 
 ## What's in this repo

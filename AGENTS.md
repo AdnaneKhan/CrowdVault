@@ -15,6 +15,7 @@ Guidance for AI coding agents (and humans) working in this repo. Read [README.md
 | `scripts/e2e.sh` | The whole flow on a local anvil chain, following the guides | Foundry + Rust |
 | `scripts/ci/` | CI helpers: cross-platform round trip, macOS signing check | bash (Git Bash on Windows) |
 | `.github/workflows/pages.yml` | Publishes `web/` to GitHub Pages on every push to `main` that touches it | |
+| `.github/workflows/build.yml` | Builds both tools for Linux, macOS and Windows on every push to `main`, round-trips each build, and uploads archives with checksums | |
 | `docs/` | User guides (`coordinator.md`, `creators.md`, `deploying.md`) and technical docs (`design.md`, `performance.md`) | |
 
 ## Build and test
